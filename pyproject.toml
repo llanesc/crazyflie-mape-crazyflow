@@ -1,0 +1,112 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crazyflie-mape-crazyflow"
+version = "0.1.0"
+description = "Multi-agent pursuit-evasion with Crazyflies using LEAP-C MPC and Crazyflow simulation."
+authors = [{ name = "Carlos Llanes" }]
+readme = "README.md"
+license = { text = "MIT" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "numpy>=2.0.0",
+    "scipy>=1.15.0",
+    "jax>=0.7.0",
+    "gymnasium>=1.1.0",
+    "torch>=2.0.0",
+    "casadi",
+    "skrl>=1.0.0",
+]
+
+requires-python = ">=3.11,<3.14"
+
+[project.optional-dependencies]
+gpu = ["jax[cuda12]"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-timeout>=2.0.0",
+    "ruff>=0.4.0",
+]
+
+[project.urls]
+Repository = "https://github.com/utiasDSL/crazyflie-mape-crazyflow"
+
+[tool.setuptools.packages.find]
+include = ["crazyflie_mape_crazyflow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["unit", "integration", "render"]
+
+[tool.ruff]
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "external",
+]
+line-length = 100
+indent-width = 4
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "D"]
+ignore = ["D100", "D104"]
+fixable = ["ALL"]
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+pip = "*"
+ruff = "*"
+python = ">=3.11,<3.14"
+
+[tool.pixi.pypi-dependencies]
+crazyflie-mape-crazyflow = { path = "./", editable = true }
+crazyflow = { path = "./external/crazyflow", editable = true }
+drone-models = { path = "./external/crazyflow/submodules/drone-models", editable = true }
+drone-controllers = { path = "./external/crazyflow/submodules/drone-controllers", editable = true }
+leap-c = { path = "./external/leap-c", editable = true }
+
+[tool.pixi.feature.gpu.pypi-dependencies]
+jax = { extras = ["cuda12"], version = "*" }
+
+[tool.pixi.feature.tests.dependencies]
+pytest = ">=8.0.0"
+pytest-timeout = ">=2.0.0"
+
+[tool.pixi.feature.tests.tasks]
+test = { cmd = "pytest -v tests", description = "Run tests" }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+gpu = { features = ["gpu"], solve-group = "default" }
+tests = { features = ["tests"], solve-group = "default" }

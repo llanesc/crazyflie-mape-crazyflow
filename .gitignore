@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+
+# Virtual environments
+env_crazyflow/
+venv/
+.venv/
+
+# IDE
+.vscode/*.db
+.vscode/*.db-shm
+.vscode/*.db-wal
+.idea/
+
+# Experiment results and checkpoints (large files)
+experiments/**/results/
+experiments/**/checkpoints/
+results/
+*.pt
+*.dat
+
+# Video recordings
+*.mp4
+*.avi
+
+# Logs
+*.log
+tensorboard/
+
+# External submodules (tracked separately)
+external/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/

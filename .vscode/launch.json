@@ -1,0 +1,70 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Eval MAPPO ACMPC (Debug)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/eval_mappo_acmpc.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--experiment", "box_random_spawn",
+                "--checkpoint", "run_20260120150819",
+                "--n-episodes", "15",
+                "--render",
+                "--deterministic"
+            ],
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "",
+                "JAX_PLATFORMS": "cpu"
+            }
+        },
+        {
+            "name": "Eval MAPPO",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/eval_mappo.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--checkpoint", "results/red_vs_blue_mappo_20260116_032420/red_vs_blue_mappo/checkpoints/best_agent.pt",
+                "--n-worlds", "1",
+                "--n-episodes", "5",
+                "--deterministic",
+                "--render"
+            ],
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "",
+                "JAX_PLATFORMS": "cpu"
+            }
+        },
+        {
+            "name": "Train MAPPO",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/train_mappo.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--n-pairs", "2",
+                "--n-worlds", "256",
+                "--timesteps", "1000000"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "",
+                "JAX_PLATFORMS": "cpu"
+            }
+        },
+        {
+            "name": "Debug Policy",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/debug_policy.py",
+            "console": "integratedTerminal",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "",
+                "JAX_PLATFORMS": "cpu"
+            }
+        }
+    ]
+}
