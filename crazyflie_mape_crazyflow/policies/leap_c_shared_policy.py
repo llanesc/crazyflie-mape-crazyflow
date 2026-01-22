@@ -10,7 +10,7 @@ State: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw] (12D)
 Control: [roll, pitch, yaw, thrust] (4D)
 """
 
-from typing import Mapping, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Mapping, Optional, Sequence, Tuple, Union
 
 import gymnasium
 import numpy as np
@@ -25,6 +25,9 @@ from crazyflie_mape_crazyflow.leap_c import (
     NX,
     NU,
 )
+
+if TYPE_CHECKING:
+    from leap_c.ocp.acados.diff_mpc import AcadosDiffMpcCtx
 from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp import (
     Q_STATE_SIZE,
     Q_CTRL_SIZE,
@@ -182,15 +185,27 @@ class LeapCMPCLayer(nn.Module):
             nn.Sigmoid(),  # Output in [0, 1]
         )
 
-    def forward(self, obs: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        obs: torch.Tensor,
+        state: torch.Tensor,
+        u0_guess: torch.Tensor | None = None,
+        ctx: Optional["AcadosDiffMpcCtx"] = None,
+    ) -> tuple[torch.Tensor, "AcadosDiffMpcCtx"]:
         """Forward pass through MPC layer.
 
         Args:
             obs: Observations with shape (B, obs_dim).
             state: MPC state with shape (B, 12) [pos, rpy, vel, drpy].
+            u0_guess: Initial control guess with shape (B, 4) [roll, pitch, yaw, thrust].
+                If None, solver uses its default initialization.
+            ctx: Context from previous solve for warmstarting. If provided, the solver
+                will use the previous solution as initial guess for faster convergence.
 
         Returns:
-            Normalized control action with shape (B, 4).
+            Tuple of:
+                - action_normalized: Normalized control action with shape (B, 4).
+                - ctx: Context object for warmstarting subsequent solves.
         """
         batch_size = obs.shape[0]
 
@@ -200,17 +215,18 @@ class LeapCMPCLayer(nn.Module):
         # Scale parameters
         mpc_params = self._scale_parameters(cost_net_out, batch_size)
 
-        # Solve MPC
+        # Solve MPC with optional initial guess and warmstart
         ctx, u0, x_traj, u_traj, value = self.planner(
             obs=state,
+            action=u0_guess,
             param=mpc_params,
-            ctx=None,
+            ctx=ctx,
         )
 
         # Normalize action to [-1, 1]
         action_normalized = (u0 - self.action_mean) / self.action_scale
 
-        return action_normalized
+        return action_normalized, ctx
 
     def _scale_parameters(self, net_out: torch.Tensor, batch_size: int) -> torch.Tensor:
         """Scale network output to MPC parameter space.
@@ -426,8 +442,8 @@ class LeapCSharedGaussianPolicy(GaussianMixin, Model):
         # Extract MPC state from observations
         state = self._extract_state(obs)
 
-        # Get mean action from MPC
-        mean_actions = self.mpc_layer(obs, state)
+        # Get mean action from MPC (ignore context for now, could be used for warmstarting)
+        mean_actions, _ = self.mpc_layer(obs, state)
 
         # Get log std
         log_std = self.log_std_parameter

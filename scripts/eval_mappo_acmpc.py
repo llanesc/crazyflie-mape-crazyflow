@@ -28,6 +28,7 @@ import json
 import time
 from pathlib import Path
 
+import mujoco
 import numpy as np
 import torch
 
@@ -39,7 +40,7 @@ from crazyflie_mape_crazyflow.policies import (
 )
 
 
-EXPERIMENTS_DIR = Path("experiments/acmpc")
+RESULTS_DIR = Path("results/acmpc")
 
 
 def find_checkpoints(search_dir: Path) -> list[Path]:
@@ -77,7 +78,7 @@ def resolve_checkpoint(experiment: str, checkpoint_arg: str | None) -> Path:
     Raises:
         FileNotFoundError: If checkpoint cannot be found.
     """
-    results_dir = EXPERIMENTS_DIR / experiment / "results"
+    results_dir = RESULTS_DIR / experiment / "results"
 
     if checkpoint_arg is None:
         # Find latest checkpoint in results directory
@@ -225,6 +226,9 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     Returns:
         Dictionary of evaluation metrics.
     """
+    # Get the raw environment (unwrap if needed)
+    raw_env = env.env if hasattr(env, 'env') else env
+
     n_worlds = env.cfg.n_worlds
     n_blue = env.cfg.n_blue
 
@@ -232,6 +236,12 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     all_episode_lengths = []
     all_rewards = []
     all_termination_reasons = []  # Track why each episode ended
+
+    # Win rate tracking for overlay
+    total_episodes_completed = 0
+    blue_wins = 0
+    red_wins = 0
+    out_of_bounds_count = 0
 
     episodes_completed = 0
     render_interval = max(1, env.cfg.control_freq // render_fps) if render else None
@@ -295,6 +305,58 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 
             # Render if requested (with real-time synchronization)
             if render and render_interval and (step % render_interval) == 0:
+                # Add overlays (only for live rendering - overlays don't work well with recording)
+                if raw_env.sim.viewer is not None and raw_env.sim.viewer.viewer is not None:
+                    viewer = raw_env.sim.viewer.viewer
+
+                    # Get velocities from sim state (world 0)
+                    vel = np.asarray(raw_env.sim.data.states.vel[0])  # (n_drones, 3)
+                    speeds = np.linalg.norm(vel, axis=-1)  # (n_drones,)
+
+                    # Get alive status (world 0)
+                    blue_alive = np.asarray(raw_env.blue_alive[0])  # (n_blue,)
+                    red_alive = np.asarray(raw_env.red_alive[0])  # (n_red,)
+
+                    # Win rates overlay
+                    if total_episodes_completed > 0:
+                        blue_win_rate = blue_wins / total_episodes_completed * 100
+                        red_win_rate = red_wins / total_episodes_completed * 100
+                        oob_rate = out_of_bounds_count / total_episodes_completed * 100
+                    else:
+                        blue_win_rate = red_win_rate = oob_rate = 0.0
+                    viewer.add_overlay(
+                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                        "Win Rates",
+                        f"Blue: {blue_win_rate:.1f}%  Red: {red_win_rate:.1f}%  OOB: {oob_rate:.1f}%"
+                    )
+                    viewer.add_overlay(
+                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                        "Episodes",
+                        f"{total_episodes_completed}/{n_episodes}"
+                    )
+
+                    # Blue agents status: velocity + alive/dead
+                    blue_status = []
+                    for i in range(n_blue):
+                        status = "●" if blue_alive[i] else "✗"
+                        blue_status.append(f"B{i}:{status} {speeds[i]:.2f}")
+                    viewer.add_overlay(
+                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                        "Blue [m/s]",
+                        "  ".join(blue_status)
+                    )
+
+                    # Red agents status: velocity + alive/dead
+                    red_status = []
+                    for i in range(len(red_alive)):
+                        status = "●" if red_alive[i] else "✗"
+                        red_status.append(f"R{i}:{status} {speeds[n_blue + i]:.2f}")
+                    viewer.add_overlay(
+                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                        "Red [m/s]",
+                        "  ".join(red_status)
+                    )
+
                 env.render()
                 # Sync to real-time
                 current_time = time.perf_counter()
@@ -324,7 +386,7 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             )
             all_rewards.append(episode_return)
 
-            # Determine termination reason
+            # Determine termination reason and update win rate tracking
             all_red_dead = not final_red_alive[world_idx].any()
             all_blue_dead = not final_blue_alive[world_idx].any()
 
@@ -332,16 +394,22 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                 reason = "survived"  # Reached max steps
             elif all_red_dead and not all_blue_dead:
                 reason = "blue_won"  # All reds eliminated, blues survive
+                blue_wins += 1
             elif episode_br_crash[world_idx] > 0:
                 reason = "captured"  # Blue-red collision (blue captured)
+                red_wins += 1
             elif episode_bb_crash[world_idx] > 0:
                 reason = "blue_crashed"  # Blue-blue collision
+                red_wins += 1
             elif episode_out_of_bounds[world_idx] > 0:
                 reason = "out_of_bounds"  # Boundary violation
+                out_of_bounds_count += 1
+                red_wins += 1
             else:
                 reason = "unknown"
 
             all_termination_reasons.append(reason)
+            total_episodes_completed += 1
 
         episodes_completed += n_worlds
         print(f"  Completed {min(episodes_completed, n_episodes)}/{n_episodes} episodes")
@@ -462,6 +530,10 @@ def main():
         pp_k_vxy=env_config.get("pursuit_gains", {}).get("pp_k_vxy", 3.39),
         pp_k_pz=env_config.get("pursuit_gains", {}).get("pp_k_pz", 20.0),
         pp_k_vz=env_config.get("pursuit_gains", {}).get("pp_k_vz", 10.0),
+        # Augmented ProNav parameters
+        N_gain=env_config.get("pursuit_gains", {}).get("N_gain", 3.0),
+        V_min=env_config.get("pursuit_gains", {}).get("V_min", 0.5),
+        K_v=env_config.get("pursuit_gains", {}).get("K_v", 2.5),
         # Target assignment
         random_target_assignment=env_config.get("random_target_assignment", False),
         # Rewards (from learning_config if available, else defaults)

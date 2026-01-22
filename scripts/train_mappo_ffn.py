@@ -24,7 +24,7 @@ def _get_device_from_config():
 
     # Find and load config
     project_root = Path(__file__).parent.parent
-    config_path = project_root / "experiments" / "ffn" / args.experiment / "config.yaml"
+    config_path = project_root / "results" / "ffn" / args.experiment / "config.yaml"
     if config_path.exists():
         with open(config_path) as f:
             config = yaml.safe_load(f)
@@ -335,8 +335,8 @@ def main():
         "drone_model": env_cfg.drone_model,
         "pursuer_strategy": env_cfg.pursuer_strategy,
         # Control limits
-        "max_roll_pitch": policy_cfg["roll_pitch_max"],
-        "max_yaw": policy_cfg["yaw_max"],
+        "roll_pitch_max": policy_cfg["roll_pitch_max"],
+        "yaw_max": policy_cfg["yaw_max"],
         # Network dimensions
         "policy_net_sizes": policy_cfg["policy_net_sizes"],
         "value_net_sizes": policy_cfg["value_net_sizes"],
@@ -366,6 +366,10 @@ def main():
             "pp_k_vxy": env_cfg.pp_k_vxy,
             "pp_k_pz": env_cfg.pp_k_pz,
             "pp_k_vz": env_cfg.pp_k_vz,
+            # Augmented ProNav parameters
+            "N_gain": env_cfg.N_gain,
+            "V_min": env_cfg.V_min,
+            "K_v": env_cfg.K_v,
         },
         # Target assignment
         "random_target_assignment": env_cfg.random_target_assignment,

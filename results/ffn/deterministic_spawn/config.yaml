@@ -1,10 +1,10 @@
-# Experiment: box_random_spawn
-# FFN policy with box random spawn positions
+# Experiment: deterministic_spawn
+# FFN policy with deterministic spawn positions
 
 # Environment settings
 environment:
   n_pairs: 2
-  pursuer_strategy: "ProNav"  # "PP" or "ProNav"
+  pursuer_strategy: "ProNav"  # "PP", "ProNav", or "AugProNav"
   drone_model: "cf2x_L250"
 
   # Simulation frequencies
@@ -19,31 +19,32 @@ environment:
   br_crash_tolerance: 0.2
 
   # Boundary settings
-  boundary_size: 6.0
+  boundary_size: 3.0
   min_altitude: 0.1
   max_altitude: 3.0
 
   # Spawn settings
   spawn:
     blue:
-      method: "box_random"
-      x_min: 3.5
-      x_max: 4.5
-      y_half: 1.0
-      z_min: 0.8
-      z_max: 1.2
+      method: "deterministic"
+      x: 2.0
+      teammate_spacing: 0.5
+      initial_height: 1.0
     red:
-      method: "box_random"
-      x_min: -0.5
-      x_max: 0.5
-      y_half: 1.0
-      z_min: 0.8
-      z_max: 1.2
+      method: "deterministic"
+      x: 0.0
+      teammate_spacing: 0.5
+      initial_height: 1.0
 
   # Pursuit gains (ProNav)
   N_pronav_fb: 5.0
   N_pronav_ff: 1.0
   velocity_closure_threshold: 0.5
+
+  # Pursuit gains (Augmented ProNav) - used when pursuer_strategy: "AugProNav"
+  N_gain: 3.0  # Navigation constant
+  V_min: 0.5   # Minimum speed floor [m/s]
+  K_v: 2.5     # Speed floor gain
 
   # Pursuit gains (Pure Pursuit)
   pp_k_pxy: 6.1624
@@ -52,7 +53,7 @@ environment:
   pp_k_vz: 10.0
 
   # Target assignment
-  random_target_assignment: true  # true for random, false for deterministic (red_i -> blue_i)
+  random_target_assignment: false  # true for random, false for deterministic (red_i -> blue_i)
 
 # Policy settings (FFN specific)
 policy:
@@ -69,7 +70,7 @@ policy:
   value_activation: "relu"
 
   # Exploration
-  initial_log_std: [-0.5, -0.5, -1, -0.5]  # or a scalar (e.g. -0.5)
+  initial_log_std: [-0.5, -0.5, -1, -0.5]
 
 # Training settings
 training:
@@ -78,8 +79,8 @@ training:
   device: "cpu"  # "cpu" or "cuda"
 
   # PPO hyperparameters
-  rollouts: 1024
-  learning_epochs: 5
+  rollouts: 256
+  learning_epochs: 8
   mini_batches: 4 # n_worlds * rollouts / 16384
   learning_rate: 0.0003
   gamma: 0.99
@@ -92,22 +93,21 @@ training:
 
   # Value preprocessor (optional)
   # Options: "RunningStandardScaler" or null (no preprocessing)
-  value_preprocessor: "RunningStandardScaler"
+  value_preprocessor: null
 
   # Learning rate scheduler (optional)
   # Options: "KLAdaptiveLR", "StepLR", or null (no scheduler)
-  # KLAdaptiveLR kwargs: kl_threshold # see https://skrl.readthedocs.io/en/latest/api/resources/schedulers/kl_adaptive.html
+  # KLAdaptiveLR kwargs: kl_threshold
   # StepLR kwargs: step_size, gamma
-  learning_rate_scheduler: "StepLR"
+  learning_rate_scheduler: null
   learning_rate_scheduler_kwargs:
-    step_size: 100_000
-    gamma: 0.9
+    kl_threshold: 0.0
 
 # Reward settings
 rewards:
-  capture: -5.0
-  red_crash: 5.0
-  blue_crash: -5.0
+  capture: -30.0
+  red_crash: 20.0
+  blue_crash: -20.0
   boundary: -5.0
   alive: 0.1
   pursuer_proximity: 0.5

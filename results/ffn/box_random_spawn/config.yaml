@@ -1,10 +1,10 @@
 # Experiment: box_random_spawn
-# ACMPC policy with box random spawn positions
+# FFN policy with box random spawn positions
 
 # Environment settings
 environment:
   n_pairs: 2
-  pursuer_strategy: "ProNav"  # "PP" or "ProNav"
+  pursuer_strategy: "ProNav"  # "PP", "ProNav", or "AugProNav"
   drone_model: "cf2x_L250"
 
   # Simulation frequencies
@@ -19,7 +19,7 @@ environment:
   br_crash_tolerance: 0.2
 
   # Boundary settings
-  boundary_size: 3.0
+  boundary_size: 6.0
   min_altitude: 0.1
   max_altitude: 3.0
 
@@ -27,8 +27,8 @@ environment:
   spawn:
     blue:
       method: "box_random"
-      x_min: 1.5
-      x_max: 2.5
+      x_min: 3.5
+      x_max: 4.5
       y_half: 1.0
       z_min: 0.8
       z_max: 1.2
@@ -45,6 +45,11 @@ environment:
   N_pronav_ff: 1.0
   velocity_closure_threshold: 0.5
 
+  # Pursuit gains (Augmented ProNav) - used when pursuer_strategy: "AugProNav"
+  N_gain: 3.0  # Navigation constant
+  V_min: 0.5   # Minimum speed floor [m/s]
+  K_v: 2.5     # Speed floor gain
+
   # Pursuit gains (Pure Pursuit)
   pp_k_pxy: 6.1624
   pp_k_vxy: 3.39
@@ -54,27 +59,22 @@ environment:
   # Target assignment
   random_target_assignment: true  # true for random, false for deterministic (red_i -> blue_i)
 
-# Policy settings (ACMPC specific)
+# Policy settings (FFN specific)
 policy:
-  # MPC settings
-  mpc_horizon: 2
-  mpc_dt: 0.01
-  mpc_velocity_max: null  # null to disable, or float value in m/s
-
   # Control limits
   roll_pitch_max: 0.5
-  yaw_max: 0.5
+  yaw_max: 0.1
 
   # Network architecture
-  cost_net_sizes: [256, 256]
+  policy_net_sizes: [256, 256]
   value_net_sizes: [256, 256]
 
   # Activation functions (options: relu, tanh, elu, leaky_relu, gelu)
-  cost_net_activation: "relu"
+  policy_activation: "relu"
   value_activation: "relu"
 
   # Exploration
-  initial_log_std: -1.2  # or a scalar (e.g. -0.5)
+  initial_log_std: [-0.5, -0.5, -1, -0.5]  # or a scalar (e.g. -0.5)
 
 # Training settings
 training:
@@ -83,9 +83,9 @@ training:
   device: "cpu"  # "cpu" or "cuda"
 
   # PPO hyperparameters
-  rollouts: 256
-  learning_epochs: 8
-  mini_batches: 4
+  rollouts: 1024
+  learning_epochs: 5
+  mini_batches: 4 # n_worlds * rollouts / 16384
   learning_rate: 0.0003
   gamma: 0.99
   gae_lambda: 0.95
@@ -94,26 +94,26 @@ training:
   value_loss_scale: 2.0
   ratio_clip: 0.2
   value_clip: 0.2
-  kl_threshold: 0.0
 
   # Value preprocessor (optional)
   # Options: "RunningStandardScaler" or null (no preprocessing)
-  value_preprocessor: null
+  value_preprocessor: "RunningStandardScaler"
 
   # Learning rate scheduler (optional)
   # Options: "KLAdaptiveLR", "StepLR", or null (no scheduler)
-  # KLAdaptiveLR kwargs: kl_threshold
+  # KLAdaptiveLR kwargs: kl_threshold # see https://skrl.readthedocs.io/en/latest/api/resources/schedulers/kl_adaptive.html
   # StepLR kwargs: step_size, gamma
-  learning_rate_scheduler: null
+  learning_rate_scheduler: "StepLR"
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.0
+    step_size: 100_000
+    gamma: 0.9
 
 # Reward settings
 rewards:
-  capture: -10.0
-  red_crash: 50.0
-  blue_crash: -10.0
-  boundary: -10.0
-  alive: 0.05
-  pursuer_proximity: 0.1
-  pursuer_proximity_decay: 2.5
+  capture: -5.0
+  red_crash: 5.0
+  blue_crash: -5.0
+  boundary: -5.0
+  alive: 0.1
+  pursuer_proximity: 0.5
+  pursuer_proximity_decay: 2.0

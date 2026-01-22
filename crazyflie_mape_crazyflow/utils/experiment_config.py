@@ -88,13 +88,23 @@ def config_to_env_config(config: dict, device: str | None = None) -> RedVsBlueEn
     if "max_altitude" in env_cfg:
         kwargs["max_altitude"] = env_cfg["max_altitude"]
 
-    # Pursuit gains
+    # Pursuit gains (ProNav)
     if "N_pronav_fb" in env_cfg:
         kwargs["N_pronav_fb"] = env_cfg["N_pronav_fb"]
     if "N_pronav_ff" in env_cfg:
         kwargs["N_pronav_ff"] = env_cfg["N_pronav_ff"]
     if "velocity_closure_threshold" in env_cfg:
         kwargs["velocity_closure_threshold"] = env_cfg["velocity_closure_threshold"]
+
+    # Pursuit gains (Augmented ProNav)
+    if "N_gain" in env_cfg:
+        kwargs["N_gain"] = env_cfg["N_gain"]
+    if "V_min" in env_cfg:
+        kwargs["V_min"] = env_cfg["V_min"]
+    if "K_v" in env_cfg:
+        kwargs["K_v"] = env_cfg["K_v"]
+
+    # Pursuit gains (Pure Pursuit)
     if "pp_k_pxy" in env_cfg:
         kwargs["pp_k_pxy"] = env_cfg["pp_k_pxy"]
     if "pp_k_vxy" in env_cfg:
@@ -260,13 +270,13 @@ def find_experiment_path(experiment_name: str, policy_type: str) -> Path:
     # Get the project root (parent of scripts directory)
     project_root = Path(__file__).parent.parent.parent
 
-    experiment_path = project_root / "experiments" / policy_type / experiment_name
+    experiment_path = project_root / "results" / policy_type / experiment_name
 
     if not experiment_path.exists():
         raise FileNotFoundError(
             f"Experiment not found: {experiment_path}\n"
-            f"Available experiments in experiments/{policy_type}/:\n"
-            + "\n".join(f"  - {d.name}" for d in (project_root / "experiments" / policy_type).iterdir() if d.is_dir())
+            f"Available experiments in results/{policy_type}/:\n"
+            + "\n".join(f"  - {d.name}" for d in (project_root / "results" / policy_type).iterdir() if d.is_dir())
         )
 
     return experiment_path

@@ -94,10 +94,15 @@ class RedVsBlueEnvConfig:
     min_altitude: float = 0.1
     max_altitude: float = 3.0
 
-    # ProNav parameters
+    # ProNav parameters (used by "ProNav" strategy)
     N_pronav_fb: float = 5.0
     N_pronav_ff: float = 1.0
     velocity_closure_threshold: float = 0.5
+
+    # Augmented ProNav parameters (used by "AugProNav" strategy)
+    N_gain: float = 3.0  # Navigation constant
+    V_min: float = 0.5  # Minimum speed floor [m/s]
+    K_v: float = 2.5  # Speed floor gain
 
     # Pure pursuit gains
     pp_k_pxy: float = 6.1624
@@ -106,8 +111,8 @@ class RedVsBlueEnvConfig:
     pp_k_vz: float = 10.0
 
     # Attitude limits
-    max_roll_pitch: float = 0.5  # rad (~28 degrees)
-    max_yaw: float = 0.1
+    roll_pitch_max: float = 0.5  # rad (~28 degrees)
+    yaw_max: float = 0.1
 
     # Reward scales
     reward_capture: float = -30.0

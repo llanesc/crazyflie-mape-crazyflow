@@ -21,10 +21,9 @@ venv/
 .vscode/*.db-wal
 .idea/
 
-# Experiment results and checkpoints (large files)
-experiments/**/results/
-experiments/**/checkpoints/
-results/
+# Training outputs and checkpoints (large files)
+results/**/run_*/
+results/**/checkpoints/
 *.pt
 *.dat
 

@@ -4,7 +4,7 @@
 # Environment settings
 environment:
   n_pairs: 2
-  pursuer_strategy: "ProNav"  # "PP" or "ProNav"
+  pursuer_strategy: "ProNav"  # "PP", "ProNav", or "AugProNav"
   drone_model: "cf2x_L250"
 
   # Simulation frequencies
@@ -23,7 +23,7 @@ environment:
   min_altitude: 0.1
   max_altitude: 3.0
 
-  # Spawn settings (default, overridden by curriculum levels)
+  # Spawn settings
   spawn:
     blue:
       method: "box_random"
@@ -44,6 +44,11 @@ environment:
   N_pronav_fb: 5.0
   N_pronav_ff: 1.0
   velocity_closure_threshold: 0.5
+
+  # Pursuit gains (Augmented ProNav) - used when pursuer_strategy: "AugProNav"
+  N_gain: 3.0  # Navigation constant
+  V_min: 0.5   # Minimum speed floor [m/s]
+  K_v: 2.5     # Speed floor gain
 
   # Pursuit gains (Pure Pursuit)
   pp_k_pxy: 6.1624
@@ -117,73 +122,3 @@ rewards:
   alive: 0.05
   pursuer_proximity: 0.1
   pursuer_proximity_decay: 2.5
-
-# Curriculum learning settings
-curriculum:
-  enabled: true
-  advance_threshold: 0.6  # 60% blue wins to advance to next level
-
-  levels:
-    # Level 0: Fixed blues, small random deviation for reds, larger collision distance (easiest)
-    - level: 0
-      spawn:
-        blue:
-          method: "deterministic"
-          x: 2.0
-          teammate_spacing: 0.5
-          initial_height: 1.0
-        red:
-          method: "box_random"
-          x_min: -0.2
-          x_max: 0.2
-          y_half: 0.4
-          z_min: 0.8
-          z_max: 1.2
-        min_spawn_distance: 0.6  # > collision tolerance to avoid immediate collision
-      bb_crash_tolerance: 0.5
-      rr_crash_tolerance: 0.5
-      br_crash_tolerance: 0.5
-
-    # Level 1: Medium deviation in red positions, medium collision distance
-    - level: 1
-      spawn:
-        blue:
-          method: "box_random"
-          x_min: 1.5
-          x_max: 2.5
-          y_half: 0.5
-          z_min: 0.8
-          z_max: 1.2
-        red:
-          method: "box_random"
-          x_min: -0.35
-          x_max: 0.35
-          y_half: 0.7
-          z_min: 0.8
-          z_max: 1.2
-        min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_crash_tolerance: 0.4
-      rr_crash_tolerance: 0.4
-      br_crash_tolerance: 0.4
-
-    # Level 2: Default box_random spawning for both teams, smallest collision distance (hardest)
-    - level: 2
-      spawn:
-        blue:
-          method: "box_random"
-          x_min: 1.5
-          x_max: 2.5
-          y_half: 1.0
-          z_min: 0.8
-          z_max: 1.2
-        red:
-          method: "box_random"
-          x_min: -0.5
-          x_max: 0.5
-          y_half: 1.0
-          z_min: 0.8
-          z_max: 1.2
-        min_spawn_distance: 0.4  # > collision tolerance to avoid immediate collision
-      bb_crash_tolerance: 0.3
-      rr_crash_tolerance: 0.3
-      br_crash_tolerance: 0.3

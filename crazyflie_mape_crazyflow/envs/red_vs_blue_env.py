@@ -384,9 +384,65 @@ def _jit_proportional_nav(
     return accel
 
 
-@partial(jax.jit, static_argnames=["pursuer_strategy", "mass", "max_roll_pitch", "max_yaw", "min_thrust", "max_thrust",
+def _jit_augmented_pronav(
+    pos_rb: jnp.ndarray,
+    vel_rb: jnp.ndarray,
+    vel_pursuer: jnp.ndarray,
+    accel_target: jnp.ndarray,
+    N_gain: float = 3.0,
+    V_min: float = 0.5,
+    K_v: float = 2.5,
+    velocity_closure_threshold: float = 0.5,
+    gravity: float = 9.81,
+    k_pxy: float = 1.0,
+    k_vxy: float = 1.0,
+    k_pz: float = 1.0,
+    k_vz: float = 1.0,
+) -> jnp.ndarray:
+    """JIT-friendly augmented proportional navigation with speed floor.
+
+    Uses APN with lateral steering and axial speed floor:
+        a_lat = N * Vc * (omega x u_r) + (N * a_target_orthogonal / 2)
+        a_axial = max(0, K_v * (V_min - |vel_pursuer|)) * vel_pursuer_unit
+    """
+    # 1. Standard 3D APN Math
+    dist = jnp.linalg.norm(pos_rb, axis=-1, keepdims=True) + 1e-6
+    u_r = pos_rb / dist  # LOS unit vector
+    omega = jnp.cross(pos_rb, vel_rb) / (dist ** 2)
+
+    # 2. Compute Vc for the APN gain
+    Vc = -jnp.sum(u_r * vel_rb, axis=-1, keepdims=True)
+
+    # 3. Orthogonal component of target acceleration
+    accel_proj = jnp.sum(accel_target * u_r, axis=-1, keepdims=True) * u_r
+    accel_orthogonal = accel_target - accel_proj
+
+    # 4. Lateral (Steering)
+    a_lat = N_gain * Vc * jnp.cross(omega, u_r) + (N_gain * accel_orthogonal / 2.0)
+
+    # 5. Axial (Speed Floor) - only accelerate if below V_min
+    pursuer_speed = jnp.linalg.norm(vel_pursuer, axis=-1, keepdims=True) + 1e-6
+    vel_pursuer_unit = vel_pursuer / pursuer_speed
+    a_axial_mag = jnp.maximum(0.0, K_v * (V_min - pursuer_speed))
+    a_axial = a_axial_mag * vel_pursuer_unit
+
+    # 6. AugProNav acceleration with gravity compensation
+    accel_pronav = a_lat + a_axial
+    accel_pronav = accel_pronav.at[..., 2].add(gravity)
+
+    # Fall back to pure pursuit when closure is insufficient
+    velocity_closure = Vc.squeeze(-1)
+    use_pure_pursuit = velocity_closure < velocity_closure_threshold
+
+    accel_pp = _jit_pure_pursuit(pos_rb, vel_rb, k_pxy, k_vxy, k_pz, k_vz, gravity)
+
+    accel = jnp.where(use_pure_pursuit[..., None], accel_pp, accel_pronav)
+    return accel
+
+
+@partial(jax.jit, static_argnames=["pursuer_strategy", "mass", "roll_pitch_max", "yaw_max", "min_thrust", "max_thrust",
                                    "pp_k_pxy", "pp_k_vxy", "pp_k_pz", "pp_k_vz", "N_pronav_fb", "N_pronav_ff",
-                                   "velocity_closure_threshold", "gravity"])
+                                   "velocity_closure_threshold", "gravity", "N_gain", "V_min", "K_v"])
 def _jit_compute_red_control(
     blue_pos: jnp.ndarray,
     blue_vel: jnp.ndarray,
@@ -398,8 +454,8 @@ def _jit_compute_red_control(
     prev_blue_accel: jnp.ndarray,
     pursuer_strategy: str,
     mass: float,
-    max_roll_pitch: float,
-    max_yaw: float,
+    roll_pitch_max: float,
+    yaw_max: float,
     min_thrust: float,
     max_thrust: float,
     pp_k_pxy: float,
@@ -410,6 +466,9 @@ def _jit_compute_red_control(
     N_pronav_ff: float,
     velocity_closure_threshold: float,
     gravity: float,
+    N_gain: float,
+    V_min: float,
+    K_v: float,
 ) -> jnp.ndarray:
     """JIT-compiled red pursuit control computation."""
     target_idx = red_target
@@ -422,7 +481,14 @@ def _jit_compute_red_control(
 
     if pursuer_strategy == "PP":
         accel = _jit_pure_pursuit(pos_rb, vel_rb, pp_k_pxy, pp_k_vxy, pp_k_pz, pp_k_vz, gravity)
-    else:  # ProNav
+    elif pursuer_strategy == "AugProNav":
+        accel_target = jnp.take_along_axis(prev_blue_accel, target_idx[:, :, None].astype(jnp.int32), axis=1)
+        accel = _jit_augmented_pronav(
+            pos_rb, vel_rb, red_vel, accel_target,
+            N_gain, V_min, K_v, velocity_closure_threshold, gravity,
+            pp_k_pxy, pp_k_vxy, pp_k_pz, pp_k_vz
+        )
+    else:  # ProNav (default)
         accel_target = jnp.take_along_axis(prev_blue_accel, target_idx[:, :, None].astype(jnp.int32), axis=1)
         accel = _jit_proportional_nav(
             pos_rb, vel_rb, accel_target,
@@ -434,8 +500,8 @@ def _jit_compute_red_control(
 
     rpy_des = jnp.clip(
         rpy_des,
-        jnp.array([-max_roll_pitch, -max_roll_pitch, -max_yaw]),
-        jnp.array([max_roll_pitch, max_roll_pitch, max_yaw])
+        jnp.array([-roll_pitch_max, -roll_pitch_max, -yaw_max]),
+        jnp.array([roll_pitch_max, roll_pitch_max, yaw_max])
     )
     thrust_des = jnp.clip(thrust_des, min_thrust, max_thrust)
 
@@ -554,15 +620,15 @@ class RedVsBlueEnv(gym.Env):
         self.action_space = spaces.Dict({
             agent: spaces.Box(
                 low=np.array([
-                    -self.cfg.max_roll_pitch,
-                    -self.cfg.max_roll_pitch,
-                    -self.cfg.max_yaw,
+                    -self.cfg.roll_pitch_max,
+                    -self.cfg.roll_pitch_max,
+                    -self.cfg.yaw_max,
                     self.cfg.min_thrust
                 ], dtype=np.float32),
                 high=np.array([
-                    self.cfg.max_roll_pitch,
-                    self.cfg.max_roll_pitch,
-                    self.cfg.max_yaw,
+                    self.cfg.roll_pitch_max,
+                    self.cfg.roll_pitch_max,
+                    self.cfg.yaw_max,
                     self.cfg.max_thrust
                 ], dtype=np.float32),
             )
@@ -615,7 +681,8 @@ class RedVsBlueEnv(gym.Env):
         # Pending blue commands
         self.blue_cmd = jnp.zeros((N, B, 4))
 
-        # Previous blue acceleration (for ProNav feedforward)
+        # Previous blue velocity and acceleration (for ProNav feedforward)
+        self.prev_blue_vel = jnp.zeros((N, B, 3))
         self.prev_blue_accel = jnp.zeros((N, B, 3))
 
     @property
@@ -662,6 +729,10 @@ class RedVsBlueEnv(gym.Env):
         # Reset alive status
         self.blue_alive = jnp.ones((self.cfg.n_worlds, self.cfg.n_blue), dtype=jnp.bool_)
         self.red_alive = jnp.ones((self.cfg.n_worlds, self.cfg.n_red), dtype=jnp.bool_)
+
+        # Reset blue velocity/acceleration tracking (for ProNav feedforward)
+        self.prev_blue_vel = jnp.zeros((self.cfg.n_worlds, self.cfg.n_blue, 3))
+        self.prev_blue_accel = jnp.zeros((self.cfg.n_worlds, self.cfg.n_blue, 3))
 
         # Reset target assignments
         N, B, R = self.cfg.n_worlds, self.cfg.n_blue, self.cfg.n_red
@@ -744,6 +815,10 @@ class RedVsBlueEnv(gym.Env):
         # Reset alive status for done worlds
         self.blue_alive = self.blue_alive.at[done_indices, :].set(True)
         self.red_alive = self.red_alive.at[done_indices, :].set(True)
+
+        # Reset blue velocity/acceleration tracking for done worlds
+        self.prev_blue_vel = self.prev_blue_vel.at[done_indices, :, :].set(0.0)
+        self.prev_blue_accel = self.prev_blue_accel.at[done_indices, :, :].set(0.0)
 
         # Respawn agents in done worlds using spawn function
         n_done = len(done_indices)
@@ -897,9 +972,9 @@ class RedVsBlueEnv(gym.Env):
                 action_array[:, i] = actions[agent_name]
 
         # Clip to ensure within bounds
-        action_array[..., 0] = np.clip(action_array[..., 0], -self.cfg.max_roll_pitch, self.cfg.max_roll_pitch)
-        action_array[..., 1] = np.clip(action_array[..., 1], -self.cfg.max_roll_pitch, self.cfg.max_roll_pitch)
-        action_array[..., 2] = np.clip(action_array[..., 2], -self.cfg.max_yaw, self.cfg.max_yaw)
+        action_array[..., 0] = np.clip(action_array[..., 0], -self.cfg.roll_pitch_max, self.cfg.roll_pitch_max)
+        action_array[..., 1] = np.clip(action_array[..., 1], -self.cfg.roll_pitch_max, self.cfg.roll_pitch_max)
+        action_array[..., 2] = np.clip(action_array[..., 2], -self.cfg.yaw_max, self.cfg.yaw_max)
         action_array[..., 3] = np.clip(action_array[..., 3], self.cfg.min_thrust, self.cfg.max_thrust)
 
         self.blue_cmd = jnp.array(action_array)
@@ -924,6 +999,11 @@ class RedVsBlueEnv(gym.Env):
         red_pos = pos[:, B:]
         red_vel = vel[:, B:]
         red_quat = quat[:, B:]
+
+        # Update blue acceleration estimate from velocity change (for ProNav feedforward)
+        dt = self.cfg.dt
+        self.prev_blue_accel = (blue_vel - self.prev_blue_vel) / dt
+        self.prev_blue_vel = blue_vel
 
         # Compute red pursuit control
         red_cmd = self._compute_red_control(
@@ -962,8 +1042,8 @@ class RedVsBlueEnv(gym.Env):
             self.red_target, self.red_alive, self.prev_blue_accel,
             self.cfg.pursuer_strategy,
             self.cfg.mass,
-            self.cfg.max_roll_pitch,
-            self.cfg.max_yaw,
+            self.cfg.roll_pitch_max,
+            self.cfg.yaw_max,
             self.cfg.min_thrust,
             self.cfg.max_thrust,
             self.cfg.pp_k_pxy,
@@ -974,6 +1054,9 @@ class RedVsBlueEnv(gym.Env):
             self.cfg.N_pronav_ff,
             self.cfg.velocity_closure_threshold,
             self.cfg.gravity,
+            self.cfg.N_gain,
+            self.cfg.V_min,
+            self.cfg.K_v,
         )
 
     def _quat_to_rpy(self, quat: jnp.ndarray) -> jnp.ndarray:

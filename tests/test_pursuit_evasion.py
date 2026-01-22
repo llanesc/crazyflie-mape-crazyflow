@@ -25,11 +25,18 @@ from drone_controllers import parametrize
 from drone_controllers.mellinger import state2attitude
 from drone_models.core import load_params
 
+import mujoco
+
 from crazyflow.control import Control
 from crazyflow.sim import Physics, Sim
+from crazyflow.sim.visualize import change_material
 
-from crazyflie_mape_crazyflow.pursuit import proportional_nav
+from crazyflie_mape_crazyflow.pursuit import augmented_pronav, proportional_nav
 from crazyflie_mape_crazyflow.utils.accel_to_attitude import accel_to_attitude
+
+# Attitude limits (rad) - reduced for smoother motion
+roll_pitch_max = 0.2
+yaw_max = 0.2
 
 
 def main():
@@ -39,10 +46,19 @@ def main():
     parser.add_argument("--render", action="store_true", help="Enable visualization")
     parser.add_argument("--render-fps", type=int, default=30, help="Render FPS")
     parser.add_argument("--drone-model", type=str, default="cf2x_T350", help="Drone model")
+    # Camera settings
+    parser.add_argument("--cam-distance", type=float, default=6.0,
+                        help="Camera distance from scene center")
+    parser.add_argument("--cam-azimuth", type=float, default=45.0,
+                        help="Camera azimuth angle in degrees (0=front, 90=side)")
+    parser.add_argument("--cam-elevation", type=float, default=-30.0,
+                        help="Camera elevation angle in degrees (negative=above)")
+    parser.add_argument("--cam-lookat", type=float, nargs=3, default=[0.0, 0.0, 1.0],
+                        help="Camera lookat point (x y z)")
     args = parser.parse_args()
 
     # Simulation parameters
-    sim_freq = 1000  # Hz
+    sim_freq = 500  # Hz
     ctrl_freq = 100  # Hz
     steps_per_ctrl = sim_freq // ctrl_freq
 
@@ -97,6 +113,10 @@ def main():
     capture_times = []
     episode_lengths = []
 
+    # Track LED and camera initialization
+    leds_initialized = False
+    camera_initialized = False
+
     print(f"\nRunning {args.episodes} episodes, {args.duration}s each ({n_steps} control steps)")
 
     for episode in range(args.episodes):
@@ -117,23 +137,27 @@ def main():
             )
         )
 
-        # Evader goal position (randomized within [-2, 2] for x and y)
-        evader_goal = np.array([
-            np.random.uniform(-2.0, 2.0),
-            np.random.uniform(-2.0, 2.0),
-            1.5
-        ])
+        # Evader trajectory parameters (figure-8 pattern)
+        fig8_radius = 1.0  # meters
+        fig8_period = 10.0  # seconds for one complete figure-8 (slower)
+        fig8_center = np.array([0.0, 0.0, 1.2])  # center of figure-8
+        fig8_phase = np.random.uniform(0, 2 * np.pi)  # random starting phase
 
         # Initialize integral error for evader controller
         int_pos_err = np.zeros(3)
+
+        dt = 1.0 / ctrl_freq
 
         # Track capture
         captured = False
         distance = 0.0
         last_render_time = time.time()
 
+        # Track previous evader velocity for acceleration estimation
+        evader_vel_prev = np.zeros(3)
+
         print(f"\n=== Episode {episode + 1}/{args.episodes} ===")
-        print(f"  Evader goal: {evader_goal}")
+        print(f"  Evader trajectory: figure-8, radius={fig8_radius}m, period={fig8_period}s, phase={fig8_phase:.2f}rad")
         print(f"  Pursuer start: {pursuer_start}")
 
         for step in range(n_steps):
@@ -164,10 +188,32 @@ def main():
                 break  # End simulation on capture
 
             # === Blue Evader Controller (state2attitude) ===
+            # Figure-8 trajectory: x = r*sin(wt + phase), y = r*sin(2(wt + phase))/2, z = constant
+            omega = 2 * np.pi / fig8_period
+            theta = omega * t + fig8_phase
+            evader_target_pos = fig8_center + np.array([
+                fig8_radius * np.sin(theta),
+                fig8_radius * np.sin(2 * theta) / 2,
+                0.0
+            ])
+            # Analytical velocity: dx/dt, dy/dt
+            evader_target_vel = np.array([
+                fig8_radius * omega * np.cos(theta),
+                fig8_radius * omega * np.cos(2 * theta),
+                0.0
+            ])
+            # Analytical acceleration: d2x/dt2, d2y/dt2
+            evader_target_acc = np.array([
+                -fig8_radius * omega**2 * np.sin(theta),
+                -2 * fig8_radius * omega**2 * np.sin(2 * theta),
+                0.0
+            ])
+
             # Build command: [x, y, z, vx, vy, vz, ax, ay, az, yaw, roll_rate, pitch_rate, yaw_rate]
             evader_cmd = np.zeros(13)
-            evader_cmd[0:3] = evader_goal  # Target position
-            evader_cmd[3:6] = 0.0  # Target velocity
+            evader_cmd[0:3] = evader_target_pos  # Target position
+            evader_cmd[3:6] = evader_target_vel  # Feedforward velocity
+            evader_cmd[6:9] = evader_target_acc  # Feedforward acceleration
             evader_cmd[6:9] = 0.0  # Target acceleration
             evader_cmd[9] = 0.0  # Target yaw
 
@@ -182,20 +228,34 @@ def main():
             )
             evader_action = np.array(evader_rpyt)
 
+            # Clip evader roll/pitch/yaw
+            evader_action[0] = np.clip(evader_action[0], -roll_pitch_max, roll_pitch_max)
+            evader_action[1] = np.clip(evader_action[1], -roll_pitch_max, roll_pitch_max)
+            evader_action[2] = np.clip(evader_action[2], -yaw_max, yaw_max)
+
             # === Red Pursuer Controller (ProNav + accel_to_attitude) ===
             # Relative position and velocity (target - pursuer)
             pos_rb = jnp.array(evader_pos - pursuer_pos)
             vel_rb = jnp.array(evader_vel - pursuer_vel)
 
-            # Estimate target acceleration (assume zero for stationary target)
-            accel_target = jnp.zeros(3)
+            # Estimate target acceleration from velocity difference
+            accel_target = jnp.array((evader_vel - evader_vel_prev) / dt)
+            evader_vel_prev = evader_vel.copy()  # Update for next step
 
-            # Compute ProNav acceleration command
-            accel_cmd = proportional_nav(
-                pos_rb, vel_rb, accel_target,
-                N_fb=5.0,
-                N_ff=1.0,
-                velocity_closure_threshold=0.5,
+            # Compute velocity closure to check if AugProNav activates
+            range_rb = jnp.linalg.norm(pos_rb)
+            direction_rb = pos_rb / (range_rb + 1e-6)
+            velocity_closure = float(-jnp.sum(vel_rb * direction_rb))
+            velocity_closure_threshold = 0.1
+            pronav_active = velocity_closure >= velocity_closure_threshold
+
+            # Compute augmented ProNav acceleration command
+            accel_cmd = augmented_pronav(
+                pos_rb, vel_rb, jnp.array(pursuer_vel), accel_target,
+                N_gain=3.0,
+                V_min=1.0,
+                K_v=2.5,
+                velocity_closure_threshold=velocity_closure_threshold,
                 gravity=gravity,
             )
 
@@ -212,11 +272,10 @@ def main():
                 float(thrust_des),
             ])
 
-            # Clip roll/pitch
-            max_roll_pitch = 0.3
-            pursuer_action[0] = np.clip(pursuer_action[0], -max_roll_pitch, max_roll_pitch)
-            pursuer_action[1] = np.clip(pursuer_action[1], -max_roll_pitch, max_roll_pitch)
-            pursuer_action[2] = np.clip(pursuer_action[2], -0.3, 0.3)
+            # Clip pursuer roll/pitch/yaw
+            pursuer_action[0] = np.clip(pursuer_action[0], -roll_pitch_max, roll_pitch_max)
+            pursuer_action[1] = np.clip(pursuer_action[1], -roll_pitch_max, roll_pitch_max)
+            pursuer_action[2] = np.clip(pursuer_action[2], -yaw_max, yaw_max)
 
             # Apply control commands
             # Shape: (n_worlds=1, n_drones=2, 4)
@@ -229,6 +288,38 @@ def main():
 
             # Render with proper frame timing
             if args.render and render_interval and (step % render_interval) == 0:
+                # Initialize LED colors and camera on first render
+                if not leds_initialized:
+                    # Blue evader: drone 0
+                    blue_rgba = np.array([0.0, 0.0, 1.0, 1.0])
+                    change_material(sim, "led_top", np.array([0]), rgba=blue_rgba, emission=1.0)
+                    change_material(sim, "led_bot", np.array([0]), rgba=blue_rgba, emission=1.0)
+                    # Red pursuer: drone 1
+                    red_rgba = np.array([1.0, 0.0, 0.0, 1.0])
+                    change_material(sim, "led_top", np.array([1]), rgba=red_rgba, emission=1.0)
+                    change_material(sim, "led_bot", np.array([1]), rgba=red_rgba, emission=1.0)
+                    leds_initialized = True
+
+                # Initialize camera on first render
+                if not camera_initialized:
+                    sim.render()  # Initialize viewer first
+                    if sim.viewer is not None and sim.viewer.viewer is not None:
+                        cam = sim.viewer.viewer.cam
+                        cam.distance = args.cam_distance
+                        cam.azimuth = args.cam_azimuth
+                        cam.elevation = args.cam_elevation
+                        cam.lookat[:] = args.cam_lookat
+                    camera_initialized = True
+
+                # Add text overlay showing pursuit strategy
+                if sim.viewer is not None and sim.viewer.viewer is not None:
+                    mode = "AugProNav" if pronav_active else "PurePursuit"
+                    sim.viewer.viewer.add_overlay(
+                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                        f"Pursuit: {mode}",
+                        f"v_close: {velocity_closure:.2f} m/s"
+                    )
+
                 sim.render()
                 # Sleep to maintain target FPS
                 current_time = time.time()
@@ -240,7 +331,8 @@ def main():
 
             # Print progress
             if step % (ctrl_freq * 2) == 0:  # Every 2 seconds
-                print(f"  t={t:.1f}s: dist={distance:.3f}m, evader_pos={evader_pos}, pursuer_pos={pursuer_pos}")
+                mode = "AugProNav" if pronav_active else "PurePursuit"
+                print(f"  t={t:.1f}s: dist={distance:.3f}m, v_close={velocity_closure:.2f}m/s, mode={mode}")
 
         # Episode ended without capture
         if not captured:
