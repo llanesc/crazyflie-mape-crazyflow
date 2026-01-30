@@ -35,9 +35,6 @@ results/**/checkpoints/
 *.log
 tensorboard/
 
-# External submodules (tracked separately)
-external/
-
 # OS
 .DS_Store
 Thumbs.db

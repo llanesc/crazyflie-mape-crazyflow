@@ -1,0 +1,9 @@
+[submodule "external/leap-c"]
+	path = external/leap-c
+	url = https://github.com/leap-c/leap-c.git
+[submodule "external/crazyflow"]
+	path = external/crazyflow
+	url = git@github.com:llanesc/crazyflow.git
+[submodule "hardware/crazyflie-lib-python"]
+	path = hardware/crazyflie-lib-python
+	url = git@github.com:llanesc/crazyflie-lib-python.git
