@@ -1,0 +1,40 @@
+1. Source the workspace                                                                                                         
+                                                                                                                                  
+  cd /home/llanesc/multiagent_pursuit_evasion/crazyflie-mape-crazyflow/hardware/ros2_ws                                           
+  source install/setup.bash                                                                                                       
+                                                                                                                                  
+  2. Launch files                                                                                                                 
+                                                                                                                                  
+  FFN policy (simulation):                                                                                                        
+  ros2 launch multiagent_pursuit_evasion launch_sim_ffn.py                                                                        
+                                                                                                                                  
+  ACMPC policy (simulation):                                                                                                      
+  ros2 launch multiagent_pursuit_evasion launch_sim_acmpc.py                                                                      
+                                                                                                                                  
+  Test Crazyswarm2 only:                                                                                                          
+  ros2 launch multiagent_pursuit_evasion launch_test_crazyswarm2.py                                                               
+                                                                                                                                  
+  3. Or run the node directly                                                                                                     
+                                                                                                                                  
+  # FFN policy                                                                                                                    
+  ros2 run multiagent_pursuit_evasion main_executor -p ffn                                                                        
+                                                                                                                                  
+  # ACMPC policy                                                                                                                  
+  ros2 run multiagent_pursuit_evasion main_executor -p acmpc                                                                      
+                                                                                                                                  
+  4. Control the experiment with the /command service                                                                             
+                                                                                                                                  
+  # Initialize (hover at starting positions)                                                                                      
+  ros2 service call /command multiagent_pursuit_evasion_interfaces/srv/Command "{command: 1}"                                     
+                                                                                                                                  
+  # Run (start pursuit-evasion)                                                                                                   
+  ros2 service call /command multiagent_pursuit_evasion_interfaces/srv/Command "{command: 2}"                                     
+                                                                                                                                  
+  # Stop                                                                                                                          
+  ros2 service call /command multiagent_pursuit_evasion_interfaces/srv/Command "{command: 0}"                                     
+                                                                                                                                  
+  Prerequisites                                                                                                                   
+                                                                                                                                  
+  Make sure your trained policy files are in place:                                                                               
+  - models/ffn/best_agent.pt and models/ffn/environment_config.json for FFN                                                       
+  - models/acmpc/best_agent.pt and models/acmpc/environment_config.json for ACMPC 

@@ -1,0 +1,204 @@
+{
+  "policy_type": "acmpc",
+  "experiment_name": "curriculum_training",
+  "n_pairs": 2,
+  "drone_model": "cf2x_T350",
+  "pursuer_strategy": "AugProNav",
+  "mpc_horizon": 2,
+  "mpc_dt": 0.01,
+  "mpc_velocity_max": null,
+  "roll_pitch_max": 0.5,
+  "yaw_max": 0.1,
+  "cost_net_sizes": [
+    256,
+    256
+  ],
+  "value_net_sizes": [
+    256,
+    256
+  ],
+  "cost_net_activation": "relu",
+  "value_activation": "relu",
+  "control_freq": 100,
+  "mellinger_freq": 500,
+  "sim_freq": 500,
+  "bb_crash_tolerance": 0.4,
+  "rr_crash_tolerance": 0.4,
+  "br_crash_tolerance": 0.4,
+  "boundary_size": 3.0,
+  "min_altitude": 0.1,
+  "max_altitude": 2.0,
+  "spawn": {
+    "blue": {
+      "method": "box_random",
+      "x_min": 1.5,
+      "x_max": 2.5,
+      "y_half": 1.0,
+      "z_min": 0.8,
+      "z_max": 1.2
+    },
+    "red": {
+      "method": "box_random",
+      "x_min": -0.5,
+      "x_max": 0.5,
+      "y_half": 1.0,
+      "z_min": 0.8,
+      "z_max": 1.2
+    }
+  },
+  "pursuit_gains": {
+    "N_pronav_fb": 5.0,
+    "N_pronav_ff": 1.0,
+    "velocity_closure_threshold": 0.1,
+    "pp_k_pxy": 6.1624,
+    "pp_k_vxy": 3.39,
+    "pp_k_pz": 20.0,
+    "pp_k_vz": 10.0,
+    "N_gain": 3.0,
+    "V_min": 0.3,
+    "K_v": 2.5
+  },
+  "random_target_assignment": true,
+  "observation_space": {
+    "per_agent_obs_dim": 46,
+    "shared_state_dim": 44,
+    "components": [
+      "own_state: pos(3) + vel(3) + rpy(3) + rpy_rates(3) = 12",
+      "own_one_hot: n_blue",
+      "all_blue_states: n_blue * (pos(3) + vel(3) + alive(1)) = n_blue * 7",
+      "all_red_states: n_red * (pos(3) + vel(3) + alive(1)) = n_red * 7",
+      "red_target_assignments: n_red * n_blue (one-hot per red)"
+    ]
+  },
+  "curriculum_levels": [
+    {
+      "name": "Level 0",
+      "params": {
+        "bb_crash_tolerance": 0.5,
+        "rr_crash_tolerance": 0.5,
+        "br_crash_tolerance": 0.5
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 2.0,
+          "teammate_spacing": 0.5,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "nominal_box",
+          "x": 0.0,
+          "teammate_spacing": 0.5,
+          "initial_height": 1.0,
+          "x_half": 0.1,
+          "y_half": 0.1,
+          "z_half": 0.1
+        },
+        "min_spawn_distance": 0.6
+      }
+    },
+    {
+      "name": "Level 1",
+      "params": {
+        "bb_crash_tolerance": 0.4,
+        "rr_crash_tolerance": 0.4,
+        "br_crash_tolerance": 0.4
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 2.0,
+          "teammate_spacing": 0.5,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "nominal_box",
+          "x": 0.0,
+          "teammate_spacing": 0.7,
+          "initial_height": 1.0,
+          "x_half": 0.4,
+          "y_half": 0.4,
+          "z_half": 0.4
+        },
+        "min_spawn_distance": 0.5
+      }
+    },
+    {
+      "name": "Level 2",
+      "params": {
+        "bb_crash_tolerance": 0.35,
+        "rr_crash_tolerance": 0.35,
+        "br_crash_tolerance": 0.35
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 2.0,
+          "teammate_spacing": 0.5,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "nominal_box",
+          "x": 0.0,
+          "teammate_spacing": 1.0,
+          "initial_height": 1.0,
+          "x_half": 0.6,
+          "y_half": 0.6,
+          "z_half": 0.4
+        },
+        "min_spawn_distance": 0.5
+      }
+    },
+    {
+      "name": "Level 3",
+      "params": {
+        "bb_crash_tolerance": 0.3,
+        "rr_crash_tolerance": 0.3,
+        "br_crash_tolerance": 0.3
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 2.0,
+          "teammate_spacing": 0.5,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "nominal_box",
+          "x": 0.0,
+          "teammate_spacing": 1.5,
+          "initial_height": 1.0,
+          "x_half": 0.8,
+          "y_half": 0.8,
+          "z_half": 0.4
+        },
+        "min_spawn_distance": 0.5
+      }
+    },
+    {
+      "name": "Level 4",
+      "params": {
+        "bb_crash_tolerance": 0.2,
+        "rr_crash_tolerance": 0.2,
+        "br_crash_tolerance": 0.2
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 2.0,
+          "teammate_spacing": 0.5,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "box_random",
+          "x_min": -0.5,
+          "x_max": 0.5,
+          "y_half": 1.0,
+          "z_min": 0.8,
+          "z_max": 1.2
+        },
+        "min_spawn_distance": 0.5
+      }
+    }
+  ]
+}

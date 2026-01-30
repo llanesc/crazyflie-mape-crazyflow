@@ -1,0 +1,12 @@
+<library path="mape_rviz_plugin">
+  <class
+    name="mape_rviz_plugin/MapePanel"
+    type="mape_rviz_plugin::MapePanel"
+    base_class_type="rviz_common::Panel"
+  >
+    <description>
+      Control panel for Multi-Agent Pursuit-Evasion system.
+      Displays drone status with colored indicators and provides Initialize/Run commands.
+    </description>
+  </class>
+</library>
