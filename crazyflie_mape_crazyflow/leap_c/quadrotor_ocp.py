@@ -82,6 +82,8 @@ def create_quadrotor_params(
     N_horizon: int = 2,
     param_interface: QuadrotorAcadosParamInterface = "global",
     drone_model: str = "cf2x_L250",
+    roll_pitch_max: float = 0.5,
+    yaw_max: float = 0.5,
 ) -> list[AcadosParameter]:
     """Create learnable parameters for quadrotor MPC with so_rpy Euler dynamics.
 
@@ -100,6 +102,8 @@ def create_quadrotor_params(
         N_horizon: Number of MPC horizon steps.
         param_interface: "global" for same params all stages, "stagewise" for varying.
         drone_model: Drone model identifier for loading physical parameters.
+        roll_pitch_max: Maximum roll/pitch command [rad].
+        yaw_max: Maximum yaw command [rad].
 
     Returns:
         List of AcadosParameter objects.
@@ -108,6 +112,8 @@ def create_quadrotor_params(
     drone_params = load_params("so_rpy", drone_model)
     mass = float(drone_params["mass"])
     gravity = float(np.abs(drone_params["gravity_vec"][2]))
+    min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
+    max_thrust = float(drone_params["thrust_max"]) * 4
 
     state_end_stages = list(range(N_horizon + 1)) if param_interface == "stagewise" else []
     ctrl_end_stages = list(range(N_horizon)) if param_interface == "stagewise" else []
@@ -117,15 +123,20 @@ def create_quadrotor_params(
     # Position (3) + RPY (3) + Velocity (3) + RPY rates (3) = 12
     state_penalty = np.array([50., 50., 100., 1., 1., 1., 10., 10., 10., 5., 5., 5.])
     # Control: [roll_cmd, pitch_cmd, yaw_cmd, thrust]
-    control_penalty = np.array([1., 1., 1., 50.])
+    control_penalty = np.array([1., 1., 1., 5.])
 
     # State scale (bounds for linear cost calculation)
     # Position scale, RPY scale (rad), Velocity scale, RPY rates scale
     state_scale = np.array([1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.])
 
-    # Action mean and scale
-    action_mean = np.array([0.0, 0.0, 0.0, mass * gravity])
-    action_scale = np.array([0.5, 0.5, 0.3, mass * gravity])
+    # Action mean and scale (computed from control bounds)
+    # Roll/pitch: [-roll_pitch_max, roll_pitch_max] -> mean=0, scale=roll_pitch_max
+    # Yaw: [-yaw_max, yaw_max] -> mean=0, scale=yaw_max
+    # Thrust: [min_thrust, max_thrust] -> mean=(min+max)/2, scale=(max-min)/2
+    thrust_mean = (min_thrust + max_thrust) / 2.0
+    thrust_scale = (max_thrust - min_thrust) / 2.0
+    action_mean = np.array([0.0, 0.0, 0.0, thrust_mean])
+    action_scale = np.array([roll_pitch_max, roll_pitch_max, yaw_max, thrust_scale])
 
     # Scaling constants - must match quadrotor_policy.py for proper parameter bounds
     q_nom = np.concatenate((state_penalty, control_penalty))
@@ -151,11 +162,13 @@ def create_quadrotor_params(
 
     p_u_low = -range_p[P_X_SIZE:] / 2
     p_u_high = range_p[P_X_SIZE:] / 2
-    # Thrust linear term should be positive (bias toward hover)
-    p_u_low[-1] = epsilon
-    p_u_high[-1] = range_p_t + epsilon
+    # Thrust linear term should be negative (bias toward hover thrust)
+    # For cost J = 0.5*q*u² + p*u, optimal is u* = -p/q
+    # With p = -q*m*g, we get u* = m*g (hover thrust)
+    p_u_low[-1] = -(range_p_t + epsilon)
+    p_u_high[-1] = -epsilon
     p_u_default = np.full((P_U_SIZE,), 0.0)
-    p_u_default[-1] = (range_p_t / 2) + epsilon
+    p_u_default[-1] = -(range_p_t / 2 + epsilon)  # Negative, biasing toward hover
 
     return [
         AcadosParameter(

@@ -28,6 +28,7 @@ import json
 import time
 from pathlib import Path
 
+import cv2
 import imageio
 import mujoco
 import numpy as np
@@ -36,8 +37,8 @@ import torch
 from crazyflie_mape_crazyflow.envs import RedVsBlueEnv, RedVsBlueEnvConfig, RescaleActionWrapper
 from crazyflie_mape_crazyflow.envs.spawn import create_spawn_fn_from_config
 from crazyflie_mape_crazyflow.policies import FFNSharedGaussianPolicy
-
-
+import jax
+# jax.config.update("jax_disable_jit", True)
 RESULTS_DIR = Path("results/ffn")
 
 
@@ -285,6 +286,19 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
         # Reset environment
         obs_dict, info = env.reset()
 
+        # Get initial positions of all drones (world 0 for display/print)
+        initial_pos = np.asarray(raw_env.sim.data.states.pos[0])  # (n_drones, 3)
+        current_episode = episodes_completed + 1
+
+        # Print initial positions
+        print(f"\n  Episode {current_episode}/{n_episodes} - Initial Positions:")
+        for i in range(n_blue):
+            pos = initial_pos[i]
+            print(f"    Blue {i}: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
+        for i in range(len(initial_pos) - n_blue):
+            pos = initial_pos[n_blue + i]
+            print(f"    Red  {i}: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
+
         episode_rewards = {agent: [] for agent in env.possible_agents}
         step = 0
         last_render_time = time.perf_counter() if render else None
@@ -314,6 +328,10 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 
             # Step environment
             obs_dict, rewards, terminated, truncated, info = env.step(actions)
+
+            # rotor_vel = env.env.sim.data.states.rotor_vel
+            # print(f"Rotor vel (RPM): {np.array(rotor_vel[0, :])}")
+
 
             # Accumulate rewards
             for agent_name, reward in rewards.items():
@@ -370,8 +388,23 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                     )
                     viewer.add_overlay(
                         mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                        "Episodes",
-                        f"{total_episodes_completed}/{n_episodes}"
+                        "Episode",
+                        f"{current_episode}/{n_episodes}"
+                    )
+
+                    # Initial positions overlay
+                    blue_init_pos = [f"B{i}:({initial_pos[i][0]:+.2f},{initial_pos[i][1]:+.2f},{initial_pos[i][2]:+.2f})" for i in range(n_blue)]
+                    viewer.add_overlay(
+                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                        "Init Blue",
+                        " ".join(blue_init_pos)
+                    )
+                    n_red = len(initial_pos) - n_blue
+                    red_init_pos = [f"R{i}:({initial_pos[n_blue+i][0]:+.2f},{initial_pos[n_blue+i][1]:+.2f},{initial_pos[n_blue+i][2]:+.2f})" for i in range(n_red)]
+                    viewer.add_overlay(
+                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                        "Init Red",
+                        " ".join(red_init_pos)
                     )
 
                     # Blue agents status: velocity + alive/dead
@@ -400,6 +433,36 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                     # Capture frame for recording
                     frame = env.render()
                     if frame is not None:
+                        # Add text overlay to frame
+                        frame = frame.copy()  # Make writable copy
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        font_scale = 0.5
+                        thickness = 1
+                        color = (255, 255, 255)  # White text
+                        bg_color = (0, 0, 0)  # Black background
+
+                        # Build overlay text
+                        lines = [
+                            f"Episode: {current_episode}/{n_episodes}",
+                            f"Step: {step}",
+                        ]
+                        # Add initial positions
+                        for i in range(n_blue):
+                            pos = initial_pos[i]
+                            lines.append(f"B{i} init: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
+                        n_red_drones = len(initial_pos) - n_blue
+                        for i in range(n_red_drones):
+                            pos = initial_pos[n_blue + i]
+                            lines.append(f"R{i} init: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
+
+                        # Draw text with background
+                        y_offset = 20
+                        for line in lines:
+                            (text_w, text_h), _ = cv2.getTextSize(line, font, font_scale, thickness)
+                            cv2.rectangle(frame, (5, y_offset - text_h - 2), (10 + text_w, y_offset + 4), bg_color, -1)
+                            cv2.putText(frame, line, (7, y_offset), font, font_scale, color, thickness, cv2.LINE_AA)
+                            y_offset += text_h + 8
+
                         frames.append(frame)
                 if render:
                     if not recording:

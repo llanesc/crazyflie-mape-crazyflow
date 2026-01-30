@@ -140,8 +140,10 @@ class RedVsBlueEnvConfig:
         drone_params = load_params("so_rpy", self.drone_model)
         self.mass = float(drone_params["mass"])
         self.gravity = float(np.abs(drone_params["gravity_vec"][2]))
-        self.min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
-        self.max_thrust = float(drone_params["thrust_max"]) * 4
+        # self.min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
+        # self.max_thrust = float(drone_params["thrust_max"]) * 4
+        self.min_thrust = self.mass * self.gravity * 0.5 
+        self.max_thrust = self.mass * self.gravity * 1.5
 
     @property
     def sim_steps_per_mellinger(self) -> int:

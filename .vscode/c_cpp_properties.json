@@ -6,10 +6,7 @@
         "limitSymbolsToIncludedHeaders": false
       },
       "includePath": [
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/multiagent_pursuit_evasion_interfaces/include/**",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/motion_capture_tracking_interfaces/include/**",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/crazyflie_interfaces/include/**",
-        "/opt/ros/humble/include/**",
+        "/opt/ros/jazzy/include/**",
         "/usr/include/**"
       ],
       "name": "ros2",

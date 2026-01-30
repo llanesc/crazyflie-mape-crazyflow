@@ -4,7 +4,7 @@
 # Environment settings
 environment:
   n_pairs: 2
-  pursuer_strategy: "ProNav"  # "PP", "ProNav", or "AugProNav"
+  pursuer_strategy: "AugProNav"  # "PP", "ProNav", or "AugProNav"
   drone_model: "cf2x_T350"
 
   # Simulation frequencies
@@ -59,31 +59,27 @@ environment:
   # Target assignment
   random_target_assignment: true  # true for random, false for deterministic (red_i -> blue_i)
 
+# Policy settings (FFN specific)
 policy:
-  # MPC settings
-  mpc_horizon: 2
-  mpc_dt: 0.01
-  mpc_velocity_max: null  # null to disable, or float value in m/s
-
   # Control limits
   roll_pitch_max: 0.5
   yaw_max: 0.1
 
   # Network architecture
-  cost_net_sizes: [256, 256]
+  policy_net_sizes: [256, 256]
   value_net_sizes: [256, 256]
 
   # Activation functions (options: relu, tanh, elu, leaky_relu, gelu)
-  cost_net_activation: "relu"
+  policy_activation: "relu"
   value_activation: "relu"
 
   # Exploration
-  initial_log_std: [-1.2, -1.2, -1.2, -1.2]  # or a scalar (e.g. -0.5)
+  initial_log_std: [-0.9, -0.9, -1, -0.9]  # or a scalar (e.g. -0.5)
 
 # Training settings
 training:
   timesteps: 2_500_000
-  n_worlds: 64
+  n_worlds: 128
   device: "cpu"  # "cpu" or "cuda"
 
   # PPO hyperparameters

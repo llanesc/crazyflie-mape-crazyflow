@@ -25,16 +25,26 @@ dependencies = [
     "numpy>=2.0.0",
     "scipy>=1.15.0",
     "jax>=0.7.0",
-    "gymnasium>=1.1.0",
-    "torch>=2.0.0",
     "casadi",
-    "skrl>=1.0.0",
 ]
 
 requires-python = ">=3.11,<3.14"
 
 [project.optional-dependencies]
+learning = [
+    "gymnasium>=1.1.0",
+    "torch>=2.0.0",
+    "skrl>=1.0.0",
+]
+hardware = [
+    "torch>=2.0.0",
+    "skrl>=1.0.0",
+    "transforms3d>=0.4.2",
+]
 gpu = ["jax[cuda12]"]
+all = [
+    "crazyflie-mape-crazyflow[learning,hardware,gpu]",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-timeout>=2.0.0",

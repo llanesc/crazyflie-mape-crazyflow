@@ -1,28 +1,14 @@
 {
+    "ROS2.distro": "jazzy",
     "python.autoComplete.extraPaths": [
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/multiagent_pursuit_evasion_interfaces/local/lib/python3.10/dist-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/build/multiagent_pursuit_evasion",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/multiagent_pursuit_evasion/lib/python3.10/site-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/motion_capture_tracking_interfaces/local/lib/python3.10/dist-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/crazyflie_sim/local/lib/python3.10/dist-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/crazyflie_examples/local/lib/python3.10/dist-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/build/crazyflie_py",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/crazyflie_py/lib/python3.10/site-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/crazyflie_interfaces/local/lib/python3.10/dist-packages",
-        "/opt/ros/humble/lib/python3.10/site-packages",
-        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+        "/opt/ros/jazzy/lib/python3.12/site-packages"
     ],
     "python.analysis.extraPaths": [
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/multiagent_pursuit_evasion_interfaces/local/lib/python3.10/dist-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/build/multiagent_pursuit_evasion",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/multiagent_pursuit_evasion/lib/python3.10/site-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/motion_capture_tracking_interfaces/local/lib/python3.10/dist-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/crazyflie_sim/local/lib/python3.10/dist-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/crazyflie_examples/local/lib/python3.10/dist-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/build/crazyflie_py",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/crazyflie_py/lib/python3.10/site-packages",
-        "/home/llanesc/Llanes_RAL2024/ros2_ws/install/crazyflie_interfaces/local/lib/python3.10/dist-packages",
-        "/opt/ros/humble/lib/python3.10/site-packages",
-        "/opt/ros/humble/local/lib/python3.10/dist-packages"
-    ]
+        "/opt/ros/jazzy/lib/python3.12/site-packages"
+    ],
+    "files.exclude": {
+        "env_crazyflow/**": true,
+        "env_hardware/**": true,
+        "results/**": true
+    }
 }

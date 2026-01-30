@@ -10,7 +10,7 @@ State: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw] (12D)
 Control: [roll, pitch, yaw, thrust] (4D)
 """
 
-from typing import TYPE_CHECKING, Mapping, Optional, Sequence, Tuple, Union
+from typing import Mapping, Optional, Sequence, Tuple, Union
 
 import gymnasium
 import numpy as np
@@ -22,12 +22,7 @@ from skrl.models.torch import GaussianMixin, Model
 from crazyflie_mape_crazyflow.leap_c import (
     QuadrotorPlanner,
     QuadrotorPlannerConfig,
-    NX,
-    NU,
 )
-
-if TYPE_CHECKING:
-    from leap_c.ocp.acados.diff_mpc import AcadosDiffMpcCtx
 from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp import (
     Q_STATE_SIZE,
     Q_CTRL_SIZE,
@@ -168,7 +163,7 @@ class LeapCMPCLayer(nn.Module):
         )
 
         state_penalty = torch.tensor([50., 50., 100., 1., 1., 1., 10., 10., 10., 5., 5., 5.])
-        control_penalty = torch.tensor([1., 1., 1., 50.])
+        control_penalty = torch.tensor([1., 1., 1., 5.])
         state_scale = torch.tensor([1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.])
 
         self.register_buffer('state_penalty', state_penalty)
@@ -189,23 +184,15 @@ class LeapCMPCLayer(nn.Module):
         self,
         obs: torch.Tensor,
         state: torch.Tensor,
-        u0_guess: torch.Tensor | None = None,
-        ctx: Optional["AcadosDiffMpcCtx"] = None,
-    ) -> tuple[torch.Tensor, "AcadosDiffMpcCtx"]:
+    ) -> torch.Tensor:
         """Forward pass through MPC layer.
 
         Args:
             obs: Observations with shape (B, obs_dim).
             state: MPC state with shape (B, 12) [pos, rpy, vel, drpy].
-            u0_guess: Initial control guess with shape (B, 4) [roll, pitch, yaw, thrust].
-                If None, solver uses its default initialization.
-            ctx: Context from previous solve for warmstarting. If provided, the solver
-                will use the previous solution as initial guess for faster convergence.
 
         Returns:
-            Tuple of:
-                - action_normalized: Normalized control action with shape (B, 4).
-                - ctx: Context object for warmstarting subsequent solves.
+            Normalized control action with shape (B, 4).
         """
         batch_size = obs.shape[0]
 
@@ -215,18 +202,16 @@ class LeapCMPCLayer(nn.Module):
         # Scale parameters
         mpc_params = self._scale_parameters(cost_net_out, batch_size)
 
-        # Solve MPC with optional initial guess and warmstart
-        ctx, u0, x_traj, u_traj, value = self.planner(
+        # Solve MPC (initialization handled by QuadrotorHoverInitializer)
+        _, u0, x_traj, u_traj, value = self.planner(
             obs=state,
-            action=u0_guess,
             param=mpc_params,
-            ctx=ctx,
         )
 
         # Normalize action to [-1, 1]
         action_normalized = (u0 - self.action_mean) / self.action_scale
 
-        return action_normalized, ctx
+        return action_normalized
 
     def _scale_parameters(self, net_out: torch.Tensor, batch_size: int) -> torch.Tensor:
         """Scale network output to MPC parameter space.
@@ -427,7 +412,7 @@ class LeapCSharedGaussianPolicy(GaussianMixin, Model):
         """Compute actions from observations.
 
         Args:
-            inputs: Dictionary containing observations.
+            inputs: Dictionary containing "states" observation tensor.
             role: Model role (unused).
 
         Returns:
@@ -442,8 +427,8 @@ class LeapCSharedGaussianPolicy(GaussianMixin, Model):
         # Extract MPC state from observations
         state = self._extract_state(obs)
 
-        # Get mean action from MPC (ignore context for now, could be used for warmstarting)
-        mean_actions, _ = self.mpc_layer(obs, state)
+        # Get mean action from MPC (uses hover as initial guess internally)
+        mean_actions = self.mpc_layer(obs, state)
 
         # Get log std
         log_std = self.log_std_parameter

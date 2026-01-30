@@ -44,3 +44,8 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+hardware/**
+!hardware/ros2_ws/src/**
+
+.vscode/**

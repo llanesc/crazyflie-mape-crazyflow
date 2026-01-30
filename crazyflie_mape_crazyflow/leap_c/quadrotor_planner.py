@@ -7,6 +7,7 @@ State: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw] (12D)
 Control: [roll, pitch, yaw, thrust] (4D)
 """
 
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,11 @@ from typing import Any
 import numpy as np
 import torch
 
+from acados_template.acados_ocp import AcadosOcp
+from acados_template.acados_ocp_iterate import AcadosOcpFlattenedIterate
 from drone_models.core import load_params
+from leap_c.ocp.acados.data import AcadosOcpSolverInput
+from leap_c.ocp.acados.initializer import AcadosDiffMpcInitializer
 from leap_c.ocp.acados.parameters import AcadosParameter, AcadosParameterManager
 from leap_c.ocp.acados.planner import AcadosPlanner
 from leap_c.ocp.acados.torch import AcadosDiffMpcCtx, AcadosDiffMpcTorch
@@ -31,6 +36,91 @@ from .quadrotor_ocp import (
     export_parametric_ocp,
     get_learnable_param_dim,
 )
+
+
+class QuadrotorHoverInitializer(AcadosDiffMpcInitializer):
+    """Initializer that sets state to x0 and control to hover thrust.
+
+    For each problem instance, the state trajectory is initialized to the
+    initial state broadcast across all stages, and the control trajectory
+    is initialized to hover [0, 0, 0, mass*gravity].
+    """
+
+    def __init__(self, ocp: AcadosOcp, mass: float, gravity: float):
+        """Initialize with OCP and drone physical parameters.
+
+        Args:
+            ocp: The acados OCP for obtaining default iterate structure.
+            mass: Drone mass [kg].
+            gravity: Gravitational acceleration magnitude [m/s^2].
+        """
+        self.default_iterate = ocp.create_default_initial_iterate().flatten()
+        self.N = ocp.solver_options.N_horizon
+        self.nx = ocp.dims.nx
+        self.nu = ocp.dims.nu
+        self.hover_thrust = mass * gravity
+        self.hover_u = np.zeros(self.nu)
+        self.hover_u[-1] = self.hover_thrust  # thrust is last element
+
+        # Precompute tiled hover control for single and batch use
+        self._hover_u_tiled = np.tile(self.hover_u, self.N)
+
+    def single_iterate(self, solver_input: AcadosOcpSolverInput) -> AcadosOcpFlattenedIterate:
+        """Generate initial iterate with state=x0 and control=hover.
+
+        Args:
+            solver_input: Solver input with x0 of shape (1, nx).
+
+        Returns:
+            Flattened iterate with hover initialization.
+        """
+        iterate = deepcopy(self.default_iterate)
+
+        # State trajectory: tile x0 across (N+1) stages
+        x0 = solver_input.x0.flatten()  # (nx,)
+        iterate.x = np.tile(x0, self.N + 1)
+
+        # Control trajectory: precomputed hover
+        iterate.u = self._hover_u_tiled.copy()
+
+        return iterate
+
+    def batch_iterate(self, solver_input: AcadosOcpSolverInput) -> "AcadosOcpFlattenedBatchIterate":
+        """Vectorized batch initialization (avoids per-sample Python loop).
+
+        Args:
+            solver_input: Batch solver input with x0 of shape (B, nx).
+
+        Returns:
+            Batched iterate with hover initialization for all samples.
+        """
+        from acados_template.acados_ocp_iterate import AcadosOcpFlattenedBatchIterate
+
+        B = solver_input.batch_size
+
+        # State trajectory: tile each x0 across (N+1) stages -> (B, (N+1)*nx)
+        x_batch = np.tile(solver_input.x0, (1, self.N + 1))
+
+        # Control trajectory: same hover for all samples -> (B, N*nu)
+        u_batch = np.tile(self._hover_u_tiled, (B, 1))
+
+        # Other fields: zeros matching default iterate dimensions
+        z_size = self.default_iterate.z.size
+        sl_size = self.default_iterate.sl.size
+        su_size = self.default_iterate.su.size
+        pi_size = self.default_iterate.pi.size
+        lam_size = self.default_iterate.lam.size
+
+        return AcadosOcpFlattenedBatchIterate(
+            x=x_batch,
+            u=u_batch,
+            z=np.zeros((B, z_size)) if z_size > 0 else np.zeros((B, 0)),
+            sl=np.zeros((B, sl_size)) if sl_size > 0 else np.zeros((B, 0)),
+            su=np.zeros((B, su_size)) if su_size > 0 else np.zeros((B, 0)),
+            pi=np.zeros((B, pi_size)) if pi_size > 0 else np.zeros((B, 0)),
+            lam=np.zeros((B, lam_size)) if lam_size > 0 else np.zeros((B, 0)),
+            N_batch=B,
+        )
 
 
 @dataclass(kw_only=True)
@@ -62,6 +152,7 @@ class QuadrotorPlannerConfig:
     roll_pitch_max: float = 0.5
     yaw_max: float = 0.1
     verbose: bool = True
+    dtype: torch.dtype = torch.float32
 
     def __post_init__(self):
         if self.T_horizon is None:
@@ -114,6 +205,8 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
                 N_horizon=self.cfg.N_horizon,
                 param_interface=self.cfg.param_interface,
                 drone_model=self.cfg.drone_model,
+                roll_pitch_max=self.cfg.roll_pitch_max,
+                yaw_max=self.cfg.yaw_max,
             )
             if params is None
             else params
@@ -138,13 +231,20 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             yaw_max=self.cfg.yaw_max,
         )
 
+        # Create hover initializer for solver warm-start
+        mass = float(self.drone_params["mass"])
+        gravity = float(np.abs(self.drone_params["gravity_vec"][2]))
+        initializer = QuadrotorHoverInitializer(ocp, mass=mass, gravity=gravity)
+
         # Create differentiable MPC
         diff_mpc = AcadosDiffMpcTorch(
             ocp,
+            initializer=initializer,
             export_directory=export_directory,
             n_batch_max=self.cfg.n_batch_max,
             num_threads_batch_solver=self.cfg.num_threads,
             verbose=self.cfg.verbose,
+            dtype=self.cfg.dtype,
         )
 
         super().__init__(param_manager=param_manager, diff_mpc=diff_mpc)

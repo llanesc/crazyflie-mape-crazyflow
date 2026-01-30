@@ -198,7 +198,7 @@ def _jit_compute_rewards(
     br_crash: jnp.ndarray,
     out_of_bounds: jnp.ndarray,
     blue_alive: jnp.ndarray,
-    pursuer_dist: jnp.ndarray,
+    red_pos: jnp.ndarray,
     reward_blue_crash: float,
     reward_red_crash: float,
     reward_capture: float,
@@ -214,6 +214,7 @@ def _jit_compute_rewards(
     reward_br = br_crash.astype(jnp.float32).sum(axis=1) * reward_capture
     reward_fence = (out_of_bounds.astype(jnp.float32) * blue_alive.astype(jnp.float32)).sum(axis=1) * reward_boundary
     reward_alive_total = blue_alive.astype(jnp.float32).sum(axis=1) * reward_alive
+    pursuer_dist = jnp.linalg.norm(red_pos[:, 0] - red_pos[:, 1], axis=-1)
     reward_proximity = reward_pursuer_proximity * jnp.exp(-reward_pursuer_proximity_decay * pursuer_dist)
 
     total_reward = (reward_bb + reward_rr + reward_br + reward_fence + reward_alive_total + reward_proximity) / n_pairs
@@ -800,34 +801,37 @@ class RedVsBlueEnv(gym.Env):
     def _reset_done_worlds(self, done_mask: np.ndarray):
         """Reset specific worlds that have terminated or truncated.
 
+        Uses vectorized jnp.where operations instead of Python for loops
+        for efficient batch reset.
+
         Args:
             done_mask: Boolean array of shape (N,) indicating which worlds to reset.
         """
         N, B, R = self.cfg.n_worlds, self.cfg.n_blue, self.cfg.n_red
-        done_indices = np.where(done_mask)[0]
 
-        if len(done_indices) == 0:
+        if not done_mask.any():
             return
 
+        # Convert mask to JAX for vectorized operations
+        mask_jnp = jnp.array(done_mask)
+
         # Reset episode steps for done worlds
-        self.episode_steps[done_indices] = 0
+        self.episode_steps[done_mask] = 0
 
-        # Reset alive status for done worlds
-        self.blue_alive = self.blue_alive.at[done_indices, :].set(True)
-        self.red_alive = self.red_alive.at[done_indices, :].set(True)
+        # Reset alive status using vectorized where
+        self.blue_alive = jnp.where(mask_jnp[:, None], True, self.blue_alive)
+        self.red_alive = jnp.where(mask_jnp[:, None], True, self.red_alive)
 
-        # Reset blue velocity/acceleration tracking for done worlds
-        self.prev_blue_vel = self.prev_blue_vel.at[done_indices, :, :].set(0.0)
-        self.prev_blue_accel = self.prev_blue_accel.at[done_indices, :, :].set(0.0)
+        # Reset blue velocity/acceleration tracking
+        self.prev_blue_vel = jnp.where(mask_jnp[:, None, None], 0.0, self.prev_blue_vel)
+        self.prev_blue_accel = jnp.where(mask_jnp[:, None, None], 0.0, self.prev_blue_accel)
 
         # Respawn agents in done worlds using spawn function
-        n_done = len(done_indices)
         key = self.sim.data.core.rng_key
         key, spawn_key, target_key = jax.random.split(key, 3)
 
         # Reset target assignments for done worlds
         # Always compute for all N worlds to avoid JIT recompilation
-        # (N is a static_argname in JIT functions)
         if self.cfg.random_target_assignment:
             all_targets, all_one_hot = _jit_random_target_assignment(
                 target_key, N, B, R
@@ -836,12 +840,9 @@ class RedVsBlueEnv(gym.Env):
             all_targets, all_one_hot = _jit_deterministic_target_assignment(
                 N, B, R
             )
-        # Select only the targets for done worlds
-        new_targets = all_targets[done_indices]
-        new_one_hot = all_one_hot[done_indices]
-        for i, env_idx in enumerate(done_indices):
-            self.red_target = self.red_target.at[env_idx, :].set(new_targets[i])
-            self.red_target_one_hot = self.red_target_one_hot.at[env_idx, :, :].set(new_one_hot[i])
+        # Vectorized target update using where
+        self.red_target = jnp.where(mask_jnp[:, None], all_targets, self.red_target)
+        self.red_target_one_hot = jnp.where(mask_jnp[:, None, None], all_one_hot, self.red_target_one_hot)
 
         # Update simulator's key so next call gets a different key
         self.sim.data = self.sim.data.replace(
@@ -849,37 +850,29 @@ class RedVsBlueEnv(gym.Env):
         )
 
         # Always spawn for all N worlds to avoid JIT recompilation
-        # (N is a static_argname in spawn JIT functions)
         all_blue_pos, all_red_pos = self._spawn_fn(spawn_key, N, B, R)
-        # Select only positions for done worlds
-        new_blue_pos = all_blue_pos[done_indices]
-        new_red_pos = all_red_pos[done_indices]
 
-        # Update positions for done worlds
+        # Vectorized position reset using where
+        new_pos = jnp.concatenate([all_blue_pos, all_red_pos], axis=1)  # (N, B+R, 3)
         states = self.sim.data.states
-        pos = states.pos
-        vel = states.vel
-        quat = states.quat
-        ang_vel = states.ang_vel
-        rotor_vel = states.rotor_vel
+        pos = jnp.where(mask_jnp[:, None, None], new_pos, states.pos)
 
-        # Reset positions
-        for i, env_idx in enumerate(done_indices):
-            pos = pos.at[env_idx, :B].set(new_blue_pos[i])
-            pos = pos.at[env_idx, B:].set(new_red_pos[i])
+        # Reset velocities, quaternion, rotor velocities using where
+        zeros_vel = jnp.zeros_like(states.vel)
+        vel = jnp.where(mask_jnp[:, None, None], zeros_vel, states.vel)
+        ang_vel = jnp.where(mask_jnp[:, None, None], zeros_vel, states.ang_vel)
 
-        # Reset velocities to zero
-        vel = vel.at[done_indices, :, :].set(0.0)
-        ang_vel = ang_vel.at[done_indices, :, :].set(0.0)
+        identity_quat = jnp.broadcast_to(
+            jnp.array([0.0, 0.0, 0.0, 1.0]), states.quat.shape
+        )
+        quat = jnp.where(mask_jnp[:, None, None], identity_quat, states.quat)
 
-        # Reset quaternion to identity (no rotation)
-        identity_quat = jnp.array([0.0, 0.0, 0.0, 1.0])
-        quat = quat.at[done_indices, :, :].set(identity_quat)
+        hover_rpm = jnp.broadcast_to(
+            jnp.array(self.hover_rpm), states.rotor_vel.shape
+        )
+        rotor_vel = jnp.where(mask_jnp[:, None, None], hover_rpm, states.rotor_vel)
 
-        # Reset rotor velocities to hover
-        rotor_vel = rotor_vel.at[done_indices, :, :].set(self.hover_rpm)
-
-        # Update sim state
+        # Update sim state (single replace)
         states = states.replace(pos=pos, vel=vel, quat=quat, ang_vel=ang_vel, rotor_vel=rotor_vel)
         self.sim.data = self.sim.data.replace(states=states)
 
@@ -912,13 +905,20 @@ class RedVsBlueEnv(gym.Env):
         bb_crash, rr_crash, br_crash, out_of_bounds = self._check_collisions()
         self._update_alive_status(bb_crash, rr_crash, br_crash, out_of_bounds)
 
-        # Store last termination events as rates (normalized by n_worlds)
+        # Batch termination event counts into single JAX sync
         n_worlds = self.cfg.n_worlds
+        term_counts = jnp.stack([
+            bb_crash.any(axis=1).sum(),
+            rr_crash.any(axis=1).sum(),
+            br_crash.any(axis=1).sum(),
+            out_of_bounds.any(axis=1).sum(),
+        ])
+        term_counts_np = np.asarray(term_counts)
         self.last_termination_events = {
-            "bb_crash": float(bb_crash.any(axis=1).sum()) / n_worlds,
-            "rr_crash": float(rr_crash.any(axis=1).sum()) / n_worlds,
-            "br_crash": float(br_crash.any(axis=1).sum()) / n_worlds,
-            "out_of_bounds": float(out_of_bounds.any(axis=1).sum()) / n_worlds,
+            "bb_crash": float(term_counts_np[0]) / n_worlds,
+            "rr_crash": float(term_counts_np[1]) / n_worlds,
+            "br_crash": float(term_counts_np[2]) / n_worlds,
+            "out_of_bounds": float(term_counts_np[3]) / n_worlds,
         }
 
         # Compute rewards
@@ -927,16 +927,19 @@ class RedVsBlueEnv(gym.Env):
         # Update episode steps (per-world)
         self.episode_steps += 1
 
-        # Check termination and truncation
-        terminated = self._check_terminated()
+        # Check termination and truncation (compute alive once, reuse)
+        all_blue_dead = ~self.blue_alive.any(axis=1)
+        all_red_dead = ~self.red_alive.any(axis=1)
+        terminated_np = np.asarray(all_blue_dead | all_red_dead)
+        terminated = {agent: terminated_np for agent in self.possible_agents}
         truncated = self._check_truncated()
 
-        # Add termination/truncation rates to tracking (compute separately for detailed tracking)
+        # Add termination/truncation rates (reuse already-computed arrays)
         sample_agent = self.possible_agents[0]
-        all_blue_dead = np.asarray(~self.blue_alive.any(axis=1))
-        all_red_dead = np.asarray(~self.red_alive.any(axis=1))
-        self.last_termination_events["all_blue_dead"] = float(all_blue_dead.sum()) / n_worlds
-        self.last_termination_events["all_red_dead"] = float(all_red_dead.sum()) / n_worlds
+        all_blue_dead_np = np.asarray(all_blue_dead)
+        all_red_dead_np = np.asarray(all_red_dead)
+        self.last_termination_events["all_blue_dead"] = float(all_blue_dead_np.sum()) / n_worlds
+        self.last_termination_events["all_red_dead"] = float(all_red_dead_np.sum()) / n_worlds
         self.last_termination_events["max_steps"] = float(truncated[sample_agent].sum()) / n_worlds
 
         # Save alive status BEFORE auto-reset for info dict
@@ -1132,11 +1135,10 @@ class RedVsBlueEnv(gym.Env):
         """
         B = self.cfg.n_blue
         red_pos = self.sim.data.states.pos[:, B:]
-        pursuer_dist = jnp.linalg.norm(red_pos[:, 0] - red_pos[:, 1], axis=-1)
 
         total_reward = _jit_compute_rewards(
             bb_crash, rr_crash, br_crash, out_of_bounds,
-            self.blue_alive, pursuer_dist,
+            self.blue_alive, red_pos,
             self.cfg.reward_blue_crash,
             self.cfg.reward_red_crash,
             self.cfg.reward_capture,
@@ -1165,7 +1167,7 @@ class RedVsBlueEnv(gym.Env):
         return {agent: truncated_np for agent in self.possible_agents}
 
     def _get_observations(self) -> dict[str, np.ndarray]:
-        """Get observations for each blue agent (optimized)."""
+        """Get observations for each blue agent (vectorized)."""
         N, B, R = self.cfg.n_worlds, self.cfg.n_blue, self.cfg.n_red
 
         # Single JAX->NumPy conversion for all state data
@@ -1188,61 +1190,65 @@ class RedVsBlueEnv(gym.Env):
         blue_quat = states.quat[:, :B]
         blue_rpy = np.asarray(self._quat_to_rpy(blue_quat))
 
+        # Cache RPY for _get_shared_state (avoids recomputation in env.state())
+        self._cached_blue_rpy = blue_rpy
+
         # Convert body angular velocity to Euler rates (JIT-compiled)
-        # This is required for MPC which expects drpy, not body angular velocity
         blue_ang_vel = states.ang_vel[:, :B]
         blue_rpy_rates = np.asarray(_jit_ang_vel_to_rpy_rates(blue_quat, blue_ang_vel))
 
-        # Build blue states (pos + vel + alive): (N, B, 7)
+        # Build all agents' own states at once: (N, B, 12)
+        all_own_states = np.concatenate([
+            blue_pos, blue_vel, blue_rpy, blue_rpy_rates
+        ], axis=-1)
+
+        # All ally one-hots masked by alive: (N, B, B)
+        all_ally_one_hot = ally_one_hot_np * blue_alive_np[:, None, :]
+
+        # Build shared masked states (same for all agents)
         blue_states = np.concatenate([
             blue_pos, blue_vel, blue_alive_np[:, :, None]
         ], axis=-1)
-
-        # Build red states (pos + vel + alive): (N, R, 7)
         red_states = np.concatenate([
             red_pos, red_vel, red_alive_np[:, :, None]
         ], axis=-1)
-
-        # Precompute masked states (applied once, used for all agents)
         blue_states_masked = (blue_states * blue_alive_np[:, :, None]).reshape(N, -1)
         red_states_masked = (red_states * red_alive_np[:, :, None]).reshape(N, -1)
         target_one_hot_masked = (red_target_one_hot_np * red_alive_np[:, :, None]).reshape(N, -1)
 
-        # Build observations for all agents
-        observations = {}
-        for i, agent_name in enumerate(self.possible_agents):
-            # Own state: pos(3) + vel(3) + rpy(3) + rpy_rates(3) = 12
-            own_state = np.concatenate([
-                blue_pos[:, i], blue_vel[:, i], blue_rpy[:, i], blue_rpy_rates[:, i]
-            ], axis=-1)
+        # Tile shared parts for all agents: (N, B, shared_dim)
+        shared = np.concatenate([blue_states_masked, red_states_masked, target_one_hot_masked], axis=-1)
+        shared_tiled = np.broadcast_to(shared[:, None, :], (N, B, shared.shape[-1]))
 
-            # Ally one-hot (masked by alive status)
-            ally_one_hot = ally_one_hot_np[:, i] * blue_alive_np
+        # Concatenate all parts: (N, B, obs_dim)
+        all_obs = np.concatenate([all_own_states, all_ally_one_hot, shared_tiled], axis=-1).astype(np.float32)
 
-            obs = np.concatenate([
-                own_state, ally_one_hot, blue_states_masked, red_states_masked, target_one_hot_masked
-            ], axis=-1)
-            observations[agent_name] = obs.astype(np.float32)
-
-        return observations
+        # Split into per-agent dict
+        return {agent: all_obs[:, i] for i, agent in enumerate(self.possible_agents)}
 
     def _get_shared_state(self) -> np.ndarray:
-        """Get shared state for centralized critic (optimized)."""
+        """Get shared state for centralized critic.
+
+        Reuses cached blue_rpy from _get_observations when available (called in same step).
+        """
         N, B, R = self.cfg.n_worlds, self.cfg.n_blue, self.cfg.n_red
 
-        # Single JAX->NumPy conversion
         states = self.sim.data.states
         pos_np = np.asarray(states.pos)
         vel_np = np.asarray(states.vel)
-        quat_np = states.quat
 
         blue_pos = pos_np[:, :B]
         blue_vel = vel_np[:, :B]
-        blue_rpy = np.asarray(self._quat_to_rpy(quat_np[:, :B]))
+
+        # Reuse cached blue_rpy if available (set by _get_observations in same step)
+        if hasattr(self, '_cached_blue_rpy') and self._cached_blue_rpy is not None:
+            blue_rpy = self._cached_blue_rpy
+        else:
+            blue_rpy = np.asarray(self._quat_to_rpy(states.quat[:, :B]))
 
         red_pos = pos_np[:, B:]
         red_vel = vel_np[:, B:]
-        red_rpy = np.asarray(self._quat_to_rpy(quat_np[:, B:]))
+        red_rpy = np.asarray(self._quat_to_rpy(states.quat[:, B:]))
 
         blue_alive_np = np.asarray(self.blue_alive).astype(np.float32)
         red_alive_np = np.asarray(self.red_alive).astype(np.float32)
@@ -1275,6 +1281,9 @@ class RedVsBlueEnv(gym.Env):
     ) -> dict[str, Any]:
         """Get info dict.
 
+        Note: Shared state for the centralized critic is NOT included here.
+        SKRL's trainer calls env.state() separately after each step.
+
         Args:
             bb_crash: Blue-blue collisions this step, shape (N, B).
             rr_crash: Red-red collisions this step, shape (N, R).
@@ -1285,7 +1294,7 @@ class RedVsBlueEnv(gym.Env):
             pre_reset_red_alive: Red alive status before auto-reset, shape (N, R).
 
         Returns:
-            Info dictionary with alive status, shared state, and termination events.
+            Info dictionary with alive status and termination events.
         """
         # Use pre-reset alive status if provided (for accurate termination tracking)
         blue_alive = pre_reset_blue_alive if pre_reset_blue_alive is not None else np.array(self.blue_alive)
@@ -1294,7 +1303,6 @@ class RedVsBlueEnv(gym.Env):
         info = {
             "blue_alive": blue_alive,
             "red_alive": red_alive,
-            "shared_state": self._get_shared_state(),
         }
 
         # Add termination event rates if provided (normalized by n_worlds)
