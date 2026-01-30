@@ -1,6 +1,6 @@
 [submodule "external/leap-c"]
 	path = external/leap-c
-	url = https://github.com/leap-c/leap-c.git
+	url = git@github.com:llanesc/leap-c.git
 [submodule "external/crazyflow"]
 	path = external/crazyflow
 	url = git@github.com:llanesc/crazyflow.git
