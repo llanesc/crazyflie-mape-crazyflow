@@ -54,3 +54,4 @@ Thumbs.db
 *.bag
 *.db3
 *.mcap
+rosbag2_**
