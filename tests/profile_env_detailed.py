@@ -48,9 +48,9 @@ def profile_env_step(env, n_steps=50):
         env._process_blue_actions(dummy_actions)
         env._apply_controls()
         env.sim.step(n_steps=env.cfg.sim_steps_per_control)
-        bb_crash, rr_crash, br_crash, out_of_bounds = env._check_collisions()
-        env._update_alive_status(bb_crash, rr_crash, br_crash, out_of_bounds)
-        _ = env._compute_rewards(bb_crash, rr_crash, br_crash, out_of_bounds)
+        bb_collision, rr_collision, rb_collision, out_of_bounds = env._check_collisions()
+        env._update_alive_status(bb_collision, rr_collision, rb_collision, out_of_bounds)
+        _ = env._compute_rewards(bb_collision, rr_collision, rb_collision, out_of_bounds)
         _ = env._get_observations()
     jax.block_until_ready(env.sim.data.states.pos)
 
@@ -77,19 +77,19 @@ def profile_env_step(env, n_steps=50):
 
         # 4. Check collisions
         t0 = time.perf_counter()
-        bb_crash, rr_crash, br_crash, out_of_bounds = env._check_collisions()
+        bb_collision, rr_collision, rb_collision, out_of_bounds = env._check_collisions()
         jax.block_until_ready(out_of_bounds)
         times["check_collisions"].append(time.perf_counter() - t0)
 
         # 5. Update alive status
         t0 = time.perf_counter()
-        env._update_alive_status(bb_crash, rr_crash, br_crash, out_of_bounds)
+        env._update_alive_status(bb_collision, rr_collision, rb_collision, out_of_bounds)
         jax.block_until_ready(env.blue_alive)
         times["update_alive"].append(time.perf_counter() - t0)
 
         # 6. Compute rewards
         t0 = time.perf_counter()
-        rewards = env._compute_rewards(bb_crash, rr_crash, br_crash, out_of_bounds)
+        rewards = env._compute_rewards(bb_collision, rr_collision, rb_collision, out_of_bounds)
         times["compute_rewards"].append(time.perf_counter() - t0)
 
         # 7. Check terminated/truncated
@@ -146,14 +146,14 @@ def profile_collision_check_detail(env):
     # Time the current loop-based approach
     t0 = time.perf_counter()
     for _ in range(100):
-        bb_crash = jnp.zeros((N, B), dtype=jnp.bool_)
+        bb_collision = jnp.zeros((N, B), dtype=jnp.bool_)
         for i in range(B):
             for j in range(i + 1, B):
                 dist = jnp.linalg.norm(blue_pos[:, i] - blue_pos[:, j], axis=-1)
                 collision = dist < 0.2
-                bb_crash = bb_crash.at[:, i].set(bb_crash[:, i] | collision)
-                bb_crash = bb_crash.at[:, j].set(bb_crash[:, j] | collision)
-    jax.block_until_ready(bb_crash)
+                bb_collision = bb_collision.at[:, i].set(bb_collision[:, i] | collision)
+                bb_collision = bb_collision.at[:, j].set(bb_collision[:, j] | collision)
+    jax.block_until_ready(bb_collision)
     t_loop = (time.perf_counter() - t0) / 100
 
     print(f"  Vectorized distance computation: {t_vectorized*1000:.3f} ms")

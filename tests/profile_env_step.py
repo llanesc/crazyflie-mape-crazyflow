@@ -119,25 +119,25 @@ def main():
         t['sim_step'] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        bb_crash, rr_crash, br_crash, out_of_bounds = self._check_collisions()
+        bb_collision, rr_collision, rb_collision, out_of_bounds = self._check_collisions()
         t['check_collisions'] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        self._update_alive_status(bb_crash, rr_crash, br_crash, out_of_bounds)
+        self._update_alive_status(bb_collision, rr_collision, rb_collision, out_of_bounds)
         t['update_alive'] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
         n_worlds = self.cfg.n_worlds
         self.last_termination_events = {
-            "bb_crash": float(bb_crash.any(axis=1).sum()) / n_worlds,
-            "rr_crash": float(rr_crash.any(axis=1).sum()) / n_worlds,
-            "br_crash": float(br_crash.any(axis=1).sum()) / n_worlds,
+            "bb_collision": float(bb_collision.any(axis=1).sum()) / n_worlds,
+            "rr_collision": float(rr_collision.any(axis=1).sum()) / n_worlds,
+            "rb_collision": float(rb_collision.any(axis=1).sum()) / n_worlds,
             "out_of_bounds": float(out_of_bounds.any(axis=1).sum()) / n_worlds,
         }
         t['term_events_dict'] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        rewards = self._compute_rewards(bb_crash, rr_crash, br_crash, out_of_bounds)
+        rewards = self._compute_rewards(bb_collision, rr_collision, rb_collision, out_of_bounds)
         t['compute_rewards'] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
@@ -178,7 +178,7 @@ def main():
 
         t0 = time.perf_counter()
         info = self._get_info(
-            bb_crash, rr_crash, br_crash, out_of_bounds, rewards,
+            bb_collision, rr_collision, rb_collision, out_of_bounds, rewards,
             pre_reset_blue_alive, pre_reset_red_alive
         )
         t['get_info'] = time.perf_counter() - t0
@@ -229,28 +229,28 @@ def main():
 
         # 4. Collisions
         t0 = time.perf_counter()
-        bb_crash, rr_crash, br_crash, out_of_bounds = env._check_collisions()
+        bb_collision, rr_collision, rb_collision, out_of_bounds = env._check_collisions()
         t_sections['collisions'].append(time.perf_counter() - t0)
 
         # 5. Alive update
         t0 = time.perf_counter()
-        env._update_alive_status(bb_crash, rr_crash, br_crash, out_of_bounds)
+        env._update_alive_status(bb_collision, rr_collision, rb_collision, out_of_bounds)
         t_sections['alive_update'].append(time.perf_counter() - t0)
 
         # 6. Termination events
         t0 = time.perf_counter()
         n_worlds = env.cfg.n_worlds
         env.last_termination_events = {
-            "bb_crash": float(bb_crash.any(axis=1).sum()) / n_worlds,
-            "rr_crash": float(rr_crash.any(axis=1).sum()) / n_worlds,
-            "br_crash": float(br_crash.any(axis=1).sum()) / n_worlds,
+            "bb_collision": float(bb_collision.any(axis=1).sum()) / n_worlds,
+            "rr_collision": float(rr_collision.any(axis=1).sum()) / n_worlds,
+            "rb_collision": float(rb_collision.any(axis=1).sum()) / n_worlds,
             "out_of_bounds": float(out_of_bounds.any(axis=1).sum()) / n_worlds,
         }
         t_sections['term_events'].append(time.perf_counter() - t0)
 
         # 7. Rewards
         t0 = time.perf_counter()
-        rewards = env._compute_rewards(bb_crash, rr_crash, br_crash, out_of_bounds)
+        rewards = env._compute_rewards(bb_collision, rr_collision, rb_collision, out_of_bounds)
         t_sections['rewards'].append(time.perf_counter() - t0)
 
         # 8. Termination/truncation
@@ -287,7 +287,7 @@ def main():
         # 12. Get info
         t0 = time.perf_counter()
         info = env._get_info(
-            bb_crash, rr_crash, br_crash, out_of_bounds, rewards,
+            bb_collision, rr_collision, rb_collision, out_of_bounds, rewards,
             pre_reset_blue_alive, pre_reset_red_alive
         )
         t_sections['get_info'].append(time.perf_counter() - t0)
@@ -372,20 +372,20 @@ def main():
 
         # 4. Collision checking
         t0 = time.perf_counter()
-        bb_crash, rr_crash, br_crash, out_of_bounds = env._check_collisions()
-        bb_crash.block_until_ready()
+        bb_collision, rr_collision, rb_collision, out_of_bounds = env._check_collisions()
+        bb_collision.block_until_ready()
         t_collisions.append(time.perf_counter() - t0)
 
         # 5. Alive status update
         t0 = time.perf_counter()
-        env._update_alive_status(bb_crash, rr_crash, br_crash, out_of_bounds)
+        env._update_alive_status(bb_collision, rr_collision, rb_collision, out_of_bounds)
         env.blue_alive.block_until_ready()
         env.red_alive.block_until_ready()
         t_alive_update.append(time.perf_counter() - t0)
 
         # 6. Reward computation
         t0 = time.perf_counter()
-        rewards = env._compute_rewards(bb_crash, rr_crash, br_crash, out_of_bounds)
+        rewards = env._compute_rewards(bb_collision, rr_collision, rb_collision, out_of_bounds)
         t_rewards.append(time.perf_counter() - t0)
 
         # 7. Termination/truncation
@@ -404,9 +404,9 @@ def main():
         t0 = time.perf_counter()
         n_worlds = env.cfg.n_worlds
         env.last_termination_events = {
-            "bb_crash": float(bb_crash.any(axis=1).sum()) / n_worlds,
-            "rr_crash": float(rr_crash.any(axis=1).sum()) / n_worlds,
-            "br_crash": float(br_crash.any(axis=1).sum()) / n_worlds,
+            "bb_collision": float(bb_collision.any(axis=1).sum()) / n_worlds,
+            "rr_collision": float(rr_collision.any(axis=1).sum()) / n_worlds,
+            "rb_collision": float(rb_collision.any(axis=1).sum()) / n_worlds,
             "out_of_bounds": float(out_of_bounds.any(axis=1).sum()) / n_worlds,
         }
         all_blue_dead = np.asarray(~env.blue_alive.any(axis=1))
@@ -433,7 +433,7 @@ def main():
         # 12. Get info (shared state for critic)
         t0 = time.perf_counter()
         info = env._get_info(
-            bb_crash, rr_crash, br_crash, out_of_bounds, rewards,
+            bb_collision, rr_collision, rb_collision, out_of_bounds, rewards,
             pre_reset_blue_alive, pre_reset_red_alive
         )
         t_get_info.append(time.perf_counter() - t0)

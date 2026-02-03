@@ -102,21 +102,21 @@ class TestRedVsBlueEnv:
             for i in range(env.cfg.n_blue):
                 for j in range(i + 1, env.cfg.n_blue):
                     dist = np.linalg.norm(blue_pos[:, i] - blue_pos[:, j], axis=-1)
-                    assert (dist >= env.cfg.bb_crash_tolerance).all(), \
+                    assert (dist >= env.cfg.bb_collision_tolerance).all(), \
                         f"Blues {i} and {j} spawn too close: {dist.min()}"
 
             # Check red-red distances
             for i in range(env.cfg.n_red):
                 for j in range(i + 1, env.cfg.n_red):
                     dist = np.linalg.norm(red_pos[:, i] - red_pos[:, j], axis=-1)
-                    assert (dist >= env.cfg.rr_crash_tolerance).all(), \
+                    assert (dist >= env.cfg.rr_collision_tolerance).all(), \
                         f"Reds {i} and {j} spawn too close: {dist.min()}"
 
             # Check blue-red distances
             for i in range(env.cfg.n_blue):
                 for j in range(env.cfg.n_red):
                     dist = np.linalg.norm(blue_pos[:, i] - red_pos[:, j], axis=-1)
-                    assert (dist >= env.cfg.br_crash_tolerance).all(), \
+                    assert (dist >= env.cfg.rb_collision_tolerance).all(), \
                         f"Blue {i} and Red {j} spawn too close: {dist.min()}"
         finally:
             env.close()
@@ -148,8 +148,8 @@ class TestRedVsBlueEnv:
 class TestCrashCounts:
     """Test that crash counts don't exceed available drones."""
 
-    def test_bb_crash_count_bounded(self):
-        """Test that bb_crash count doesn't exceed number of worlds."""
+    def test_bb_collision_count_bounded(self):
+        """Test that bb_collision count doesn't exceed number of worlds."""
         env = create_test_env(n_worlds=8)
         try:
             env.reset()
@@ -162,16 +162,16 @@ class TestCrashCounts:
                 }
                 _, _, _, _, _ = env.step(actions)
 
-                # Check bb_crash is bounded
-                bb_count = env.last_termination_events["bb_crash"]
-                # bb_crash counts worlds with at least one bb collision
+                # Check bb_collision is bounded
+                bb_count = env.last_termination_events["bb_collision"]
+                # bb_collision counts worlds with at least one bb collision
                 assert bb_count <= env.cfg.n_worlds, \
-                    f"bb_crash count {bb_count} exceeds n_worlds {env.cfg.n_worlds}"
+                    f"bb_collision count {bb_count} exceeds n_worlds {env.cfg.n_worlds}"
         finally:
             env.close()
 
-    def test_rr_crash_count_bounded(self):
-        """Test that rr_crash count doesn't exceed number of worlds."""
+    def test_rr_collision_count_bounded(self):
+        """Test that rr_collision count doesn't exceed number of worlds."""
         env = create_test_env(n_worlds=8)
         try:
             env.reset()
@@ -183,14 +183,14 @@ class TestCrashCounts:
                 }
                 _, _, _, _, _ = env.step(actions)
 
-                rr_count = env.last_termination_events["rr_crash"]
+                rr_count = env.last_termination_events["rr_collision"]
                 assert rr_count <= env.cfg.n_worlds, \
-                    f"rr_crash count {rr_count} exceeds n_worlds {env.cfg.n_worlds}"
+                    f"rr_collision count {rr_count} exceeds n_worlds {env.cfg.n_worlds}"
         finally:
             env.close()
 
-    def test_br_crash_count_bounded(self):
-        """Test that br_crash count doesn't exceed number of worlds."""
+    def test_rb_collision_count_bounded(self):
+        """Test that rb_collision count doesn't exceed number of worlds."""
         env = create_test_env(n_worlds=8)
         try:
             env.reset()
@@ -202,9 +202,9 @@ class TestCrashCounts:
                 }
                 _, _, _, _, _ = env.step(actions)
 
-                br_count = env.last_termination_events["br_crash"]
+                br_count = env.last_termination_events["rb_collision"]
                 assert br_count <= env.cfg.n_worlds, \
-                    f"br_crash count {br_count} exceeds n_worlds {env.cfg.n_worlds}"
+                    f"rb_collision count {br_count} exceeds n_worlds {env.cfg.n_worlds}"
         finally:
             env.close()
 
@@ -281,9 +281,9 @@ class TestRewardComputation:
                 _, rewards, _, _, _ = env.step(actions)
 
                 # Accumulate termination events
-                total_bb_events += env.last_termination_events["bb_crash"]
-                total_rr_events += env.last_termination_events["rr_crash"]
-                total_br_events += env.last_termination_events["br_crash"]
+                total_bb_events += env.last_termination_events["bb_collision"]
+                total_rr_events += env.last_termination_events["rr_collision"]
+                total_br_events += env.last_termination_events["rb_collision"]
                 total_oob_events += env.last_termination_events["out_of_bounds"]
 
                 # Accumulate rewards (same for all agents)
@@ -292,9 +292,9 @@ class TestRewardComputation:
 
             # Verify termination events were tracked
             print(f"Total events over {n_steps} steps across {env.cfg.n_worlds} worlds:")
-            print(f"  bb_crash: {total_bb_events}")
-            print(f"  rr_crash: {total_rr_events}")
-            print(f"  br_crash: {total_br_events}")
+            print(f"  bb_collision: {total_bb_events}")
+            print(f"  rr_collision: {total_rr_events}")
+            print(f"  rb_collision: {total_br_events}")
             print(f"  out_of_bounds: {total_oob_events}")
             print(f"  total_reward: {total_reward}")
 
@@ -411,9 +411,9 @@ class TestTerminationEventTracking:
         try:
             env.reset()
 
-            assert "bb_crash" in env.last_termination_events
-            assert "rr_crash" in env.last_termination_events
-            assert "br_crash" in env.last_termination_events
+            assert "bb_collision" in env.last_termination_events
+            assert "rr_collision" in env.last_termination_events
+            assert "rb_collision" in env.last_termination_events
             assert "out_of_bounds" in env.last_termination_events
             assert "all_blue_dead" in env.last_termination_events
             assert "max_steps" in env.last_termination_events
@@ -463,14 +463,14 @@ class TestTerminationEventTracking:
                 }
                 env.step(actions)
 
-                total_bb += env.last_termination_events["bb_crash"]
-                total_br += env.last_termination_events["br_crash"]
+                total_bb += env.last_termination_events["bb_collision"]
+                total_br += env.last_termination_events["rb_collision"]
                 total_oob += env.last_termination_events["out_of_bounds"]
                 total_terminated += env.last_termination_events["all_blue_dead"]
 
             print(f"\nDeath causes over 200 steps:")
-            print(f"  bb_crash: {total_bb}")
-            print(f"  br_crash: {total_br}")
+            print(f"  bb_collision: {total_bb}")
+            print(f"  rb_collision: {total_br}")
             print(f"  out_of_bounds: {total_oob}")
             print(f"  all_blue_dead (terminations): {total_terminated}")
 

@@ -31,12 +31,12 @@ from crazyflow.control import Control
 from crazyflow.sim import Physics, Sim
 from crazyflow.sim.visualize import change_material
 
-from crazyflie_mape_crazyflow.pursuit import augmented_pronav, proportional_nav
+from crazyflie_mape_crazyflow.pursuit import pronav_with_axial
 from crazyflie_mape_crazyflow.utils.accel_to_attitude import accel_to_attitude
 
 # Attitude limits (rad) - reduced for smoother motion
 roll_pitch_max = 0.2
-yaw_max = 0.2
+yaw_max = 0.05
 
 
 def main():
@@ -139,22 +139,17 @@ def main():
 
         # Evader trajectory parameters (figure-8 pattern)
         fig8_radius = 1.0  # meters
-        fig8_period = 10.0  # seconds for one complete figure-8 (slower)
+        fig8_period = 8.0  # seconds for one complete figure-8
         fig8_center = np.array([0.0, 0.0, 1.2])  # center of figure-8
         fig8_phase = np.random.uniform(0, 2 * np.pi)  # random starting phase
 
         # Initialize integral error for evader controller
         int_pos_err = np.zeros(3)
 
-        dt = 1.0 / ctrl_freq
-
         # Track capture
         captured = False
         distance = 0.0
         last_render_time = time.time()
-
-        # Track previous evader velocity for acceleration estimation
-        evader_vel_prev = np.zeros(3)
 
         print(f"\n=== Episode {episode + 1}/{args.episodes} ===")
         print(f"  Evader trajectory: figure-8, radius={fig8_radius}m, period={fig8_period}s, phase={fig8_phase:.2f}rad")
@@ -238,24 +233,12 @@ def main():
             pos_rb = jnp.array(evader_pos - pursuer_pos)
             vel_rb = jnp.array(evader_vel - pursuer_vel)
 
-            # Estimate target acceleration from velocity difference
-            accel_target = jnp.array((evader_vel - evader_vel_prev) / dt)
-            evader_vel_prev = evader_vel.copy()  # Update for next step
-
-            # Compute velocity closure to check if AugProNav activates
-            range_rb = jnp.linalg.norm(pos_rb)
-            direction_rb = pos_rb / (range_rb + 1e-6)
-            velocity_closure = float(-jnp.sum(vel_rb * direction_rb))
-            velocity_closure_threshold = 0.1
-            pronav_active = velocity_closure >= velocity_closure_threshold
-
-            # Compute augmented ProNav acceleration command
-            accel_cmd = augmented_pronav(
-                pos_rb, vel_rb, jnp.array(pursuer_vel), accel_target,
+            # Compute ProNav with axial speed floor acceleration command
+            accel_cmd = pronav_with_axial(
+                pos_rb, vel_rb, jnp.array(pursuer_vel),
                 N_gain=3.0,
-                V_min=1.0,
-                K_v=2.5,
-                velocity_closure_threshold=velocity_closure_threshold,
+                V_min=0.5,
+                K_v=2.,
                 gravity=gravity,
             )
 
@@ -268,7 +251,7 @@ def main():
             pursuer_action = np.array([
                 float(rpy_des[0]),
                 float(rpy_des[1]),
-                float(rpy_des[2]),
+                0.0,  # Zero yaw to prevent yawing
                 float(thrust_des),
             ])
 
@@ -313,11 +296,10 @@ def main():
 
                 # Add text overlay showing pursuit strategy
                 if sim.viewer is not None and sim.viewer.viewer is not None:
-                    mode = "AugProNav" if pronav_active else "PurePursuit"
                     sim.viewer.viewer.add_overlay(
                         mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                        f"Pursuit: {mode}",
-                        f"v_close: {velocity_closure:.2f} m/s"
+                        "Pursuit: TPN",
+                        f"dist: {distance:.2f} m"
                     )
 
                 sim.render()
@@ -331,8 +313,7 @@ def main():
 
             # Print progress
             if step % (ctrl_freq * 2) == 0:  # Every 2 seconds
-                mode = "AugProNav" if pronav_active else "PurePursuit"
-                print(f"  t={t:.1f}s: dist={distance:.3f}m, v_close={velocity_closure:.2f}m/s, mode={mode}")
+                print(f"  t={t:.1f}s: dist={distance:.3f}m")
 
         # Episode ended without capture
         if not captured:

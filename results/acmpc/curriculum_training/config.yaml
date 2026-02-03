@@ -4,7 +4,7 @@
 # Environment settings
 environment:
   n_pairs: 2
-  pursuer_strategy: "ProNav"  # "PP", "ProNav", or "AugProNav"
+  pursuer_strategy: "ProNav"  # "PP", "ProNav", "AugProNav", or "TPN"
   drone_model: "cf2x_T350"
 
   # Simulation frequencies
@@ -14,9 +14,9 @@ environment:
   episode_length_s: 20.0
 
   # Collision tolerances
-  bb_crash_tolerance: 0.2
-  rr_crash_tolerance: 0.2
-  br_crash_tolerance: 0.2
+  bb_collision_tolerance: 0.2
+  rr_collision_tolerance: 0.2
+  rb_collision_tolerance: 0.2
 
   # Boundary settings
   boundary_size: 3.0
@@ -58,6 +58,20 @@ environment:
 
   # Target assignment
   random_target_assignment: true  # true for random, false for deterministic (red_i -> blue_i)
+
+  # Physical parameters (optional mass override)
+  # mass: 0.032  # Override drone mass [kg], if not set uses drone_model default
+
+  # Domain randomization
+  randomize_mass: false  # Randomize mass with normal distribution
+  randomize_inertia: false  # Randomize inertia with normal distribution
+  mass_randomization_std: 0.002  # Standard deviation for mass randomization [kg]
+  inertia_randomization_std: 3.0e-6  # Standard deviation for inertia randomization [kg*m^2]
+
+  # Disturbance forces/torques
+  enable_disturbance: false  # Enable random disturbance forces and torques
+  disturbance_force_std: 0.01  # Standard deviation for force disturbance [N]
+  disturbance_torque_std: 1.0e-4  # Standard deviation for torque disturbance [Nm]
 
 policy:
   # MPC settings
@@ -121,6 +135,12 @@ rewards:
   alive: 0.05
   pursuer_proximity: 0.1
   pursuer_proximity_decay: 2.5
+  # Angle penalty (penalizes orientation deviation from level flight)
+  angle_coef: 0.08
+  # Action penalties (energy and smoothness)
+  action_coef: 0.01
+  action_smoothness_thrust: 0.2
+  action_smoothness_rpy: 0.4
 
 # Curriculum learning settings
 curriculum:
@@ -144,9 +164,9 @@ curriculum:
           y_half: 0.1             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.1             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.6  # > collision tolerance to avoid immediate collision
-      bb_crash_tolerance: 0.5
-      rr_crash_tolerance: 0.5
-      br_crash_tolerance: 0.5
+      bb_collision_tolerance: 0.5
+      rr_collision_tolerance: 0.5
+      rb_collision_tolerance: 0.5
 
     - level: 1
       spawn:
@@ -164,9 +184,9 @@ curriculum:
           y_half: 0.4             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.4             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_crash_tolerance: 0.4
-      rr_crash_tolerance: 0.4
-      br_crash_tolerance: 0.4
+      bb_collision_tolerance: 0.4
+      rr_collision_tolerance: 0.4
+      rb_collision_tolerance: 0.4
 
     - level: 2
       spawn:
@@ -184,9 +204,9 @@ curriculum:
           y_half: 0.6             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.4             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_crash_tolerance: 0.35
-      rr_crash_tolerance: 0.35
-      br_crash_tolerance: 0.35
+      bb_collision_tolerance: 0.35
+      rr_collision_tolerance: 0.35
+      rb_collision_tolerance: 0.35
 
     - level: 3
       spawn:
@@ -204,9 +224,9 @@ curriculum:
           y_half: 0.8             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.4             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_crash_tolerance: 0.3
-      rr_crash_tolerance: 0.3
-      br_crash_tolerance: 0.3
+      bb_collision_tolerance: 0.3
+      rr_collision_tolerance: 0.3
+      rb_collision_tolerance: 0.3
 
     - level: 4
       spawn:
@@ -223,6 +243,6 @@ curriculum:
           z_min: 0.8
           z_max: 1.2
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_crash_tolerance: 0.2
-      rr_crash_tolerance: 0.2
-      br_crash_tolerance: 0.2
+      bb_collision_tolerance: 0.2
+      rr_collision_tolerance: 0.2
+      rb_collision_tolerance: 0.2
