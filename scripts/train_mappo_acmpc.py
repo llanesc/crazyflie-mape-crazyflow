@@ -82,8 +82,8 @@ class TerminationLoggingWrapper:
     """Wrapper that logs termination and collision events to TensorBoard via SKRL agent.
 
     Tracks:
-    - Termination events: all_blue_dead, all_red_dead, out_of_bounds, max_steps
-    - Collision events: bb_crash, rr_crash, br_crash
+    - Termination events: blue_win, red_win, max_steps
+    - Collision events: bb_collision, rr_collision, rb_collision
 
     Also handles curriculum learning by tracking blue wins and updating
     environment parameters when advancing levels.
@@ -95,6 +95,9 @@ class TerminationLoggingWrapper:
         raw_env,
         log_interval: int = 100,
         curriculum_manager: Optional[CurriculumManager] = None,
+        experiment_dir: Optional[Path] = None,
+        checkpoint_retention_interval: int = 500000,
+        initial_timestep: int = 0,
     ):
         """Initialize the wrapper.
 
@@ -103,6 +106,9 @@ class TerminationLoggingWrapper:
             raw_env: Raw RedVsBlueEnv for accessing termination info directly.
             log_interval: Interval (in steps) for logging to TensorBoard.
             curriculum_manager: Optional curriculum manager for progressive difficulty.
+            experiment_dir: Directory to save best_agent.pt checkpoint.
+            checkpoint_retention_interval: Keep checkpoints at multiples of this interval (default 500k).
+            initial_timestep: Starting timestep when resuming training.
         """
         # Use object.__setattr__ to avoid triggering our custom __getattr__
         object.__setattr__(self, '_env', env)
@@ -111,10 +117,19 @@ class TerminationLoggingWrapper:
         object.__setattr__(self, '_log_interval', log_interval)
         object.__setattr__(self, '_termination_counts', defaultdict(float))
         object.__setattr__(self, '_collision_counts', defaultdict(float))
-        object.__setattr__(self, '_step_count', 0)
+        object.__setattr__(self, '_step_count', initial_timestep)
         object.__setattr__(self, '_total_episodes', 0)
         object.__setattr__(self, '_curriculum_manager', curriculum_manager)
         object.__setattr__(self, '_n_worlds', raw_env.cfg.n_worlds)
+        object.__setattr__(self, '_experiment_dir', experiment_dir)
+        object.__setattr__(self, '_checkpoint_retention_interval', checkpoint_retention_interval)
+
+        # Track cumulative reward components per world (episode returns)
+        # Will be initialized on first step when we know the component names
+        object.__setattr__(self, '_cumulative_components', None)
+        object.__setattr__(self, '_component_names', None)
+        # Completed episode returns (accumulated between logging intervals)
+        object.__setattr__(self, '_completed_episode_components', defaultdict(list))
 
         # Register curriculum level change callback
         if curriculum_manager is not None:
@@ -137,6 +152,14 @@ class TerminationLoggingWrapper:
         """Set the SKRL agent for logging."""
         object.__setattr__(self, '_agent', agent)
 
+    def set_initial_timestep(self, timestep: int):
+        """Set the initial timestep for correct step tracking when resuming training.
+
+        Args:
+            timestep: The timestep to resume from.
+        """
+        object.__setattr__(self, '_step_count', timestep)
+
     def __getattr__(self, name):
         """Forward attribute access to wrapped environment."""
         return getattr(self._env, name)
@@ -155,25 +178,57 @@ class TerminationLoggingWrapper:
         term_events = self._raw_env.last_termination_events
         n_worlds = self._n_worlds
 
-        # Collision events (not termination reasons, just individual agent collisions)
+        # Collision/violation events (not termination reasons, just individual agent events)
         # Divide by 2 because each collision involves 2 agents
-        self._collision_counts["collision/bb_crash"] += term_events["bb_crash"] * n_worlds / 2
-        self._collision_counts["collision/rr_crash"] += term_events["rr_crash"] * n_worlds / 2
-        self._collision_counts["collision/br_crash"] += term_events["br_crash"] * n_worlds
+        self._collision_counts["collision/bb_collision"] += term_events["bb_collision"] * n_worlds / 2
+        self._collision_counts["collision/rr_collision"] += term_events["rr_collision"] * n_worlds / 2
+        self._collision_counts["collision/rb_collision"] += term_events["rb_collision"] * n_worlds
+        self._collision_counts["collision/out_of_bounds"] += term_events["out_of_bounds"] * n_worlds
 
-        # Termination events (episode-ending reasons)
-        self._termination_counts["termination/out_of_bounds"] += term_events["out_of_bounds"] * n_worlds
-        self._termination_counts["termination/all_blue_dead"] += term_events["all_blue_dead"] * n_worlds
-        self._termination_counts["termination/all_red_dead"] += term_events.get("all_red_dead", 0) * n_worlds
+        # Termination events (episode-ending reasons - these only fire once per episode)
+        self._termination_counts["termination/red_win"] += term_events["red_win"] * n_worlds
+        self._termination_counts["termination/blue_win"] += term_events.get("blue_win", 0) * n_worlds
         self._termination_counts["termination/max_steps"] += term_events["max_steps"] * n_worlds
 
-        # Track total episodes
-        n_all_red_dead = int(round(term_events.get("all_red_dead", 0) * n_worlds))
-        n_all_blue_dead = int(round(term_events["all_blue_dead"] * n_worlds))
+        # Track total episodes (mutually exclusive outcomes to avoid double counting)
+        n_blue_win = int(round(term_events.get("blue_win", 0) * n_worlds))
+        n_red_win = int(round(term_events["red_win"] * n_worlds))
         n_max_steps = int(round(term_events["max_steps"] * n_worlds))
-        n_episodes_ended = n_all_red_dead + n_all_blue_dead + n_max_steps
+        n_episodes_ended = n_blue_win + n_red_win + n_max_steps
         if n_episodes_ended > 0:
             object.__setattr__(self, '_total_episodes', self._total_episodes + n_episodes_ended)
+
+        # Track cumulative reward components per world (episode returns)
+        if hasattr(self._raw_env, 'last_reward_components'):
+            components = self._raw_env.last_reward_components
+
+            # Initialize tracking arrays on first step
+            if self._cumulative_components is None:
+                names = list(components.keys())
+                object.__setattr__(self, '_component_names', names)
+                object.__setattr__(self, '_cumulative_components', {
+                    name: np.zeros(n_worlds) for name in names
+                })
+
+            # Add current step's components to cumulative totals (per world)
+            for name in self._component_names:
+                self._cumulative_components[name] += components[name]
+
+            # Check which worlds terminated this step
+            sample_agent = self._raw_env.possible_agents[0]
+            terminated_arr = terminated.get(sample_agent, np.zeros(n_worlds, dtype=bool))
+            truncated_arr = truncated.get(sample_agent, np.zeros(n_worlds, dtype=bool))
+            # Flatten to 1D in case arrays are (n_worlds, 1) from SKRL wrapper
+            done_mask = np.asarray(terminated_arr | truncated_arr).flatten()
+
+            # Record completed episode returns and reset cumulative for done worlds
+            if done_mask.any():
+                for name in self._component_names:
+                    # Store completed episode returns
+                    completed_returns = self._cumulative_components[name][done_mask]
+                    self._completed_episode_components[name].extend(completed_returns.tolist())
+                    # Reset cumulative for done worlds
+                    self._cumulative_components[name][done_mask] = 0.0
 
         self._step_count += 1
 
@@ -186,7 +241,15 @@ class TerminationLoggingWrapper:
     def _log_events(self):
         """Log accumulated termination and collision events to TensorBoard via SKRL agent."""
         # Log termination counts and rates (rates sum to 1 as proportions)
-        total_terminations = sum(self._termination_counts.values())
+        # Total episodes = blue_win + red_win + max_steps (mutually exclusive outcomes)
+        # - blue_win: all reds dead AND at least one blue survives
+        # - red_win: all blues dead (includes draws where both teams die)
+        # - max_steps: neither team eliminated
+        total_terminations = (
+            self._termination_counts["termination/blue_win"] +
+            self._termination_counts["termination/red_win"] +
+            self._termination_counts["termination/max_steps"]
+        )
         for key, count in self._termination_counts.items():
             self._agent.track_data(key, count)
             rate_key = key.replace("termination/", "termination_rate/")
@@ -206,9 +269,27 @@ class TerminationLoggingWrapper:
         # Log total episodes
         self._agent.track_data("episode/total", self._total_episodes)
 
+        # Log individual reward component episode returns (mean of completed episodes)
+        total_mean_return = 0.0
+        n_components = 0
+        for name, returns in self._completed_episode_components.items():
+            if len(returns) > 0:
+                mean_return = np.mean(returns)
+                self._agent.track_data(f"reward/{name}", mean_return)
+                total_mean_return += mean_return
+                n_components += 1
+
+        # Save latest agent checkpoint
+        if self._experiment_dir is not None:
+            # Remove old best_agent file if it exists
+            for old_best in self._experiment_dir.glob("best_agent_*.pt"):
+                old_best.unlink()
+            best_agent_path = self._experiment_dir / f"best_agent_{self._step_count}.pt"
+            self._agent.save(str(best_agent_path))
+
         # Compute blue win rate and check for curriculum advancement
         if self._curriculum_manager is not None:
-            n_blue_wins = self._termination_counts["termination/all_red_dead"]
+            n_blue_wins = self._termination_counts["termination/blue_win"]
             # Win rate = blue wins / total episodes (blue wins + blue losses + max_steps)
             win_rate = n_blue_wins / total_terminations if total_terminations > 0 else 0.0
 
@@ -227,6 +308,44 @@ class TerminationLoggingWrapper:
         # Reset counters
         object.__setattr__(self, '_termination_counts', defaultdict(float))
         object.__setattr__(self, '_collision_counts', defaultdict(float))
+        object.__setattr__(self, '_completed_episode_components', defaultdict(list))
+
+        # Clean up old checkpoints (keep only those at retention interval multiples)
+        self._cleanup_checkpoints()
+
+    def _cleanup_checkpoints(self):
+        """Delete checkpoints that are not at retention interval multiples.
+
+        Keeps checkpoints at multiples of checkpoint_retention_interval (e.g., 500k, 1M, 1.5M).
+        Always keeps best_agent.pt and final_checkpoint.pt.
+        """
+        if self._experiment_dir is None:
+            return
+
+        checkpoints_dir = self._experiment_dir / "checkpoints"
+        if not checkpoints_dir.exists():
+            return
+
+        retention_interval = self._checkpoint_retention_interval
+
+        # Find all numbered checkpoint files
+        for checkpoint_file in checkpoints_dir.glob("agent_*.pt"):
+            # Skip non-numbered files like best_agent.pt
+            stem = checkpoint_file.stem
+            if not stem.startswith("agent_"):
+                continue
+
+            try:
+                step_str = stem.split("_")[1]
+                if not step_str.isdigit():
+                    continue
+                step = int(step_str)
+            except (IndexError, ValueError):
+                continue
+
+            # Delete if not at a retention interval multiple
+            if step % retention_interval != 0:
+                checkpoint_file.unlink()
 
     def close(self):
         """Close environment."""
@@ -239,15 +358,76 @@ def parse_args():
         description="Train MAPPO with ACMPC policy on Red vs Blue environment",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Example:
+Examples:
+    # Start fresh training
     python scripts/train_mappo_acmpc.py --experiment deterministic_spawn
+
+    # Resume from a previous run (just specify run name)
+    python scripts/train_mappo_acmpc.py --experiment curriculum_training --resume-run run_20260120033721
+
+    # Resume from a run at a specific curriculum level
+    python scripts/train_mappo_acmpc.py --experiment curriculum_training --resume-run run_20260120033721 --curriculum-level 5
         """,
     )
 
     parser.add_argument("--experiment", type=str, required=True,
                         help="Experiment name (e.g., 'deterministic_spawn')")
+    parser.add_argument("--resume-run", type=str, default=None,
+                        help="Run name (e.g., 'run_20260120033721') or full path to resume from")
+    parser.add_argument("--curriculum-level", type=int, default=None,
+                        help="Curriculum level to start at (0-indexed). Required when using --resume-run with curriculum learning")
 
     return parser.parse_args()
+
+
+def find_latest_checkpoint(run_dir: Path) -> tuple[Path, int]:
+    """Find the latest checkpoint in a run directory.
+
+    Prefers best_agent_*.pt over periodic checkpoints.
+
+    Args:
+        run_dir: Path to the run directory containing checkpoints/ subdirectory.
+
+    Returns:
+        Tuple of (checkpoint_path, step_number) for the latest checkpoint.
+
+    Raises:
+        FileNotFoundError: If no checkpoints are found.
+    """
+    # First check for best_agent_*.pt in run directory
+    best_agents = list(run_dir.glob("best_agent_*.pt"))
+    if best_agents:
+        # Extract step from filename and return the one with highest step
+        best_with_steps = []
+        for f in best_agents:
+            try:
+                step = int(f.stem.split("_")[-1])
+                best_with_steps.append((f, step))
+            except (IndexError, ValueError):
+                continue
+        if best_with_steps:
+            best_with_steps.sort(key=lambda x: x[1], reverse=True)
+            return best_with_steps[0]
+
+    # Fall back to periodic checkpoints in checkpoints/ subdirectory
+    checkpoints_dir = run_dir / "checkpoints"
+    if not checkpoints_dir.exists():
+        raise FileNotFoundError(f"No checkpoints found in {run_dir}")
+
+    checkpoint_files = []
+    for f in checkpoints_dir.glob("agent_*.pt"):
+        try:
+            step = int(f.stem.split("_")[1])
+            checkpoint_files.append((f, step))
+        except (IndexError, ValueError):
+            continue
+
+    if not checkpoint_files:
+        raise FileNotFoundError(f"No checkpoint files found in {run_dir}")
+
+    # Sort by step number (highest first) and return the latest
+    checkpoint_files.sort(key=lambda x: x[1], reverse=True)
+    return checkpoint_files[0]
 
 
 def generate_run_id() -> str:
@@ -288,14 +468,31 @@ def main():
     env_cfg = config_to_env_config(config, device=device_str)
     spawn_fn = get_spawn_fn_from_config(config)
 
-    # Create results directory inside experiment folder
-    results_dir = experiment_path / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    run_id = generate_run_id()
-    run_name = f"run_{run_id}"
-    # SKRL will create the run directory, we just define the path for saving configs
-    experiment_dir = results_dir / run_name
-    experiment_dir.mkdir(parents=True, exist_ok=True)
+    # Set up results directory
+    if args.resume_run is not None:
+        # Check if it's just a run name or a full path
+        resume_run_path = Path(args.resume_run)
+        if not resume_run_path.exists():
+            # Try treating it as just a run name within the current experiment
+            resume_run_path = experiment_path / "results" / args.resume_run
+        if not resume_run_path.exists():
+            raise FileNotFoundError(
+                f"Run directory not found: {args.resume_run}\n"
+                f"Tried: {args.resume_run} and {experiment_path / 'results' / args.resume_run}"
+            )
+        experiment_dir = resume_run_path
+        # Extract results_dir and run_name from the path
+        results_dir = experiment_dir.parent
+        run_name = experiment_dir.name
+        print(f"Resuming training in existing run directory: {experiment_dir}")
+    else:
+        # Create new results directory inside experiment folder
+        results_dir = experiment_path / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        run_id = generate_run_id()
+        run_name = f"run_{run_id}"
+        experiment_dir = results_dir / run_name
+        experiment_dir.mkdir(parents=True, exist_ok=True)
 
     # Track start time
     start_time = datetime.now()
@@ -353,9 +550,9 @@ def main():
         "mellinger_freq": env_cfg.mellinger_freq,
         "sim_freq": env_cfg.sim_freq,
         # Crash tolerances
-        "bb_crash_tolerance": env_cfg.bb_crash_tolerance,
-        "rr_crash_tolerance": env_cfg.rr_crash_tolerance,
-        "br_crash_tolerance": env_cfg.br_crash_tolerance,
+        "bb_collision_tolerance": env_cfg.bb_collision_tolerance,
+        "rr_collision_tolerance": env_cfg.rr_collision_tolerance,
+        "rb_collision_tolerance": env_cfg.rb_collision_tolerance,
         # Boundary settings
         "boundary_size": env_cfg.boundary_size,
         "min_altitude": env_cfg.min_altitude,
@@ -376,6 +573,17 @@ def main():
             "V_min": env_cfg.V_min,
             "K_v": env_cfg.K_v,
         },
+        # Physical parameters
+        "mass": env_cfg.mass,
+        # Domain randomization
+        "randomize_mass": env_cfg.randomize_mass,
+        "randomize_inertia": env_cfg.randomize_inertia,
+        "mass_randomization_std": env_cfg.mass_randomization_std,
+        "inertia_randomization_std": env_cfg.inertia_randomization_std,
+        # Disturbance forces/torques
+        "enable_disturbance": env_cfg.enable_disturbance,
+        "disturbance_force_std": env_cfg.disturbance_force_std,
+        "disturbance_torque_std": env_cfg.disturbance_torque_std,
         # Target assignment
         "random_target_assignment": env_cfg.random_target_assignment,
         # Observation space description
@@ -423,6 +631,11 @@ def main():
             "alive": env_cfg.reward_alive,
             "pursuer_proximity": env_cfg.reward_pursuer_proximity,
             "pursuer_proximity_decay": env_cfg.reward_pursuer_proximity_decay,
+            "angle_coef": env_cfg.reward_angle_coef,
+            "velocity_coef": env_cfg.reward_velocity_coef,
+            "action_coef": env_cfg.reward_action_coef,
+            "action_smoothness_thrust": env_cfg.reward_action_smoothness_thrust,
+            "action_smoothness_rpy": env_cfg.reward_action_smoothness_rpy,
         },
         # PPO hyperparameters
         "hyperparameters": {
@@ -444,6 +657,9 @@ def main():
         "initial_log_std": policy_cfg["initial_log_std"],
         "episode_length_s": env_cfg.episode_length_s,
         "start_time": start_time_str,
+        # Resume info
+        "resumed_from_run": args.resume_run,
+        "initial_curriculum_level": args.curriculum_level,
     }
     learning_config_path = experiment_dir / "learning_config.json"
     with open(learning_config_path, "w") as f:
@@ -469,7 +685,7 @@ def main():
     env = wrap_env(env, wrapper="pettingzoo")
 
     # Wrap with termination logging and curriculum (agent will be set after creation)
-    env = TerminationLoggingWrapper(env, raw_env, log_interval=5000, curriculum_manager=curriculum_manager)
+    env = TerminationLoggingWrapper(env, raw_env, log_interval=5000, curriculum_manager=curriculum_manager, experiment_dir=experiment_dir)
 
     print(f"Environment created with {env_cfg.n_drones} drones ({env_cfg.n_blue} blue, {env_cfg.n_red} red)")
     print(f"Possible agents: {env.possible_agents}")
@@ -550,7 +766,7 @@ def main():
             "directory": str(results_dir),
             "experiment_name": run_name,
             "write_interval": 100,
-            "checkpoint_interval": 1000,
+            "checkpoint_interval": 5000,
         },
     })
 
@@ -593,9 +809,32 @@ def main():
     print(f"Learnable parameters in policy: {sum(p.numel() for p in shared_policy.parameters() if p.requires_grad)}")
     print(f"Learnable parameters in critic: {sum(p.numel() for p in shared_critic.parameters() if p.requires_grad)}")
 
+    # Load checkpoint if resuming from a previous run
+    initial_timestep = 0
+    if args.resume_run is not None:
+        checkpoint_path, resume_step = find_latest_checkpoint(experiment_dir)
+        print(f"Loading checkpoint: {checkpoint_path} (step {resume_step})")
+        agent.load(str(checkpoint_path))
+        initial_timestep = resume_step
+        # Update wrapper's step count for correct best_agent step tracking
+        env.set_initial_timestep(initial_timestep)
+        print(f"Checkpoint loaded successfully, resuming from step {initial_timestep}")
+
+    # Set curriculum level if specified (must be after loading checkpoint)
+    if args.curriculum_level is not None:
+        if curriculum_manager is None:
+            print(f"Warning: --curriculum-level specified but curriculum is not enabled in config")
+        else:
+            curriculum_manager.set_level(args.curriculum_level)
+    elif args.resume_run is not None and curriculum_manager is not None:
+        # If resuming but no curriculum level specified, warn user
+        print(f"[Curriculum] Warning: Resuming from run but no --curriculum-level specified. Starting at level 0.")
+
     # Create trainer
+    # When resuming, add initial_timestep to total so we train for the full additional duration
+    total_timesteps = timesteps + initial_timestep
     trainer_cfg = {
-        "timesteps": timesteps,
+        "timesteps": total_timesteps,
         "headless": True,
     }
 
@@ -604,6 +843,11 @@ def main():
         agents=agent,
         cfg=trainer_cfg,
     )
+    # Manually set initial_timestep since SKRL's Trainer doesn't read it from config
+    trainer.initial_timestep = initial_timestep
+
+    if initial_timestep > 0:
+        print(f"Training from step {initial_timestep} to {total_timesteps} ({timesteps} additional steps)")
 
     print("Starting training...")
     trainer.train()

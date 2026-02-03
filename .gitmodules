@@ -8,3 +8,9 @@
 [submodule "hardware/crazyflie-lib-python"]
 	path = hardware/crazyflie-lib-python
 	url = git@github.com:llanesc/crazyflie-lib-python.git
+[submodule "hardware/ros2_ws/src/crazyswarm2"]
+	path = hardware/ros2_ws/src/crazyswarm2
+	url = https://github.com/llanesc/crazyswarm2.git
+[submodule "external/skrl"]
+	path = external/skrl
+	url = https://github.com/Toni-SM/skrl.git

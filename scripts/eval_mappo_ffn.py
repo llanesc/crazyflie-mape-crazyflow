@@ -25,6 +25,7 @@ if _device == "cpu":
 # For cuda, let JAX auto-detect
 
 import json
+import random
 import time
 from pathlib import Path
 
@@ -42,34 +43,99 @@ import jax
 RESULTS_DIR = Path("results/ffn")
 
 
+def parse_step_string(step_str: str) -> int:
+    """Parse step string like '500k', '1m', '1.5m', '2m' into integer.
+
+    Args:
+        step_str: Step string with optional k/m suffix (case-insensitive).
+
+    Returns:
+        Integer step value.
+
+    Raises:
+        ValueError: If string cannot be parsed.
+    """
+    step_str = step_str.strip().lower()
+
+    if step_str.endswith('m'):
+        # Million suffix
+        value = float(step_str[:-1])
+        return int(value * 1_000_000)
+    elif step_str.endswith('k'):
+        # Thousand suffix
+        value = float(step_str[:-1])
+        return int(value * 1_000)
+    else:
+        # Plain integer
+        return int(step_str)
+
+
+# Backwards compatibility mapping: old param names -> new param names
+# Old configs used "*_crash_tolerance" instead of "*_collision_tolerance"
+PARAM_NAME_ALIASES = {
+    "bb_crash_tolerance": "bb_collision_tolerance",
+    "rr_crash_tolerance": "rr_collision_tolerance",
+    "br_crash_tolerance": "rb_collision_tolerance",  # Note: also fixes br -> rb
+}
+
+
+def translate_param_name(name: str) -> str:
+    """Translate old parameter names to new ones for backwards compatibility."""
+    return PARAM_NAME_ALIASES.get(name, name)
+
+
 def find_checkpoints(search_dir: Path) -> list[Path]:
     """Find all checkpoint files in a directory.
 
-    Searches for best_agent.pt, final_checkpoint.pt, and agent_*.pt files.
+    Searches for best_agent_*.pt, final_checkpoint.pt, and agent_*.pt files.
+    Priority: best_agent_*.pt > final_checkpoint.pt > periodic checkpoints (by step number).
 
     Args:
         search_dir: Directory to search in.
 
     Returns:
-        List of checkpoint paths, sorted by modification time (newest first).
+        List of checkpoint paths, with best_agent first if it exists.
     """
     checkpoints = []
-    # Priority order: best_agent > final_checkpoint > periodic checkpoints
-    checkpoints.extend(search_dir.glob("**/best_agent.pt"))
-    checkpoints.extend(search_dir.glob("**/final_checkpoint.pt"))
-    checkpoints.extend(search_dir.glob("**/checkpoints/agent_*.pt"))
-    # Sort by modification time, newest first
-    checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def get_step(p: Path) -> int:
+        """Extract step number from filename."""
+        try:
+            # Handle both best_agent_12345.pt and agent_12345.pt
+            return int(p.stem.split("_")[-1])
+        except (IndexError, ValueError):
+            return 0
+
+    # Priority 1: best_agent_*.pt (always preferred)
+    best_agents = list(search_dir.glob("**/best_agent_*.pt"))
+    if best_agents:
+        # Sort by step number (highest first)
+        best_agents.sort(key=get_step, reverse=True)
+        checkpoints.extend(best_agents)
+
+    # Priority 2: final_checkpoint.pt
+    final_checkpoints = list(search_dir.glob("**/final_checkpoint.pt"))
+    if final_checkpoints:
+        final_checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        checkpoints.extend(final_checkpoints)
+
+    # Priority 3: periodic checkpoints (sorted by step number, highest first)
+    periodic = list(search_dir.glob("**/checkpoints/agent_*.pt"))
+    periodic.sort(key=get_step, reverse=True)
+    checkpoints.extend(periodic)
+
     return checkpoints
 
 
-def resolve_checkpoint(experiment: str, checkpoint_arg: str | None) -> Path:
+def resolve_checkpoint(experiment: str, checkpoint_arg: str | None, step: str | None = None) -> Path:
     """Resolve checkpoint path from argument.
 
     Args:
         experiment: Experiment name (e.g., "box_random_spawn").
         checkpoint_arg: Either None (find latest), run folder name (e.g., "run_12345678"),
             or full checkpoint file path.
+        step: Optional step string (e.g., "500k", "1m", "1.5m", "2m") to load a specific
+            periodic checkpoint. Only used when checkpoint_arg is a run folder name.
 
     Returns:
         Path to the checkpoint file.
@@ -98,17 +164,35 @@ def resolve_checkpoint(experiment: str, checkpoint_arg: str | None) -> Path:
 
     # If it's already a valid file path, use it directly
     if checkpoint_path.exists() and checkpoint_path.is_file():
+        if step is not None:
+            print(f"Warning: --step ignored when checkpoint is a file path")
         return checkpoint_path
 
     # Try as run folder name in results directory (e.g., "run_12345678")
     run_dir = results_dir / checkpoint_arg
     if run_dir.exists() and run_dir.is_dir():
+        # If step is specified, look for that specific checkpoint
+        if step is not None:
+            step_num = parse_step_string(step)
+            checkpoint_file = run_dir / "checkpoints" / f"agent_{step_num}.pt"
+            if checkpoint_file.exists():
+                return checkpoint_file
+            # Also try without checkpoints subdirectory
+            checkpoint_file_alt = run_dir / f"agent_{step_num}.pt"
+            if checkpoint_file_alt.exists():
+                return checkpoint_file_alt
+            raise FileNotFoundError(
+                f"Checkpoint for step {step} ({step_num}) not found in {run_dir}. "
+                f"Tried: {checkpoint_file} and {checkpoint_file_alt}"
+            )
+
+        # No step specified, use priority search
         checkpoints = find_checkpoints(run_dir)
         if checkpoints:
             return checkpoints[0]
         raise FileNotFoundError(
             f"No checkpoint found in {run_dir}. "
-            "Expected best_agent.pt, final_checkpoint.pt, or checkpoints/agent_*.pt"
+            "Expected best_agent_*.pt, final_checkpoint.pt, or checkpoints/agent_*.pt"
         )
 
     raise FileNotFoundError(
@@ -126,6 +210,7 @@ def parse_args():
 Example:
     python scripts/eval_mappo_ffn.py --experiment box_random_spawn
     python scripts/eval_mappo_ffn.py --experiment box_random_spawn --checkpoint run_12345678
+    python scripts/eval_mappo_ffn.py --experiment box_random_spawn --checkpoint run_12345678 --step 1m
         """,
     )
 
@@ -136,6 +221,11 @@ Example:
     # Checkpoint (optional - will find latest if not specified)
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Run folder name (e.g., 'run_12345678') or full path. Omit for latest.")
+
+    # Step selection (optional - load specific checkpoint step)
+    parser.add_argument("--step", type=str, default=None,
+                        help="Checkpoint step to load (e.g., '500k', '1m', '1.5m', '2m'). "
+                             "Requires --checkpoint to specify run folder.")
 
     # Environment settings (only n_worlds and device can be changed for eval)
     parser.add_argument("--n-worlds", type=int, default=1, help="Number of parallel environments")
@@ -165,6 +255,13 @@ Example:
 
     # Output
     parser.add_argument("--output", type=str, default=None, help="Output JSON file for results")
+
+    # Reproducibility
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
+
+    # Debug
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print per-episode outcomes for debugging")
 
     return parser.parse_args()
 
@@ -224,7 +321,7 @@ def load_configs(checkpoint_path: Path) -> tuple[dict, dict | None]:
 
 
 def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_fps=30, record_path=None,
-             cam_distance=8.0, cam_azimuth=90.0, cam_elevation=-25.0, cam_lookat=(0.0, 0.0, 1.0)):
+             cam_distance=8.0, cam_azimuth=90.0, cam_elevation=-25.0, cam_lookat=(0.0, 0.0, 1.0), verbose=False):
     """Run evaluation episodes and collect metrics.
 
     Args:
@@ -258,7 +355,12 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     total_episodes_completed = 0
     blue_wins = 0
     red_wins = 0
-    out_of_bounds_count = 0
+
+    # Collision stats accumulators
+    total_bb_collision = 0
+    total_rr_collision = 0
+    total_rb_collision = 0
+    total_out_of_bounds = 0
 
     # Recording setup
     frames = [] if record_path else None
@@ -303,10 +405,11 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
         step = 0
         last_render_time = time.perf_counter() if render else None
 
-        # Track cumulative termination events per world
-        episode_bb_crash = np.zeros(n_worlds)
-        episode_br_crash = np.zeros(n_worlds)
-        episode_out_of_bounds = np.zeros(n_worlds)
+        # Track cumulative collision events for this episode (aggregate across all worlds)
+        episode_bb_collision = 0
+        episode_rr_collision = 0
+        episode_rb_collision = 0
+        episode_out_of_bounds = 0
 
         done = False
         while not done:
@@ -326,8 +429,26 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 
                     actions[agent_name] = action.cpu().numpy()
 
+                    # Debug: print first step actions for verbose mode
+                    if verbose and step == 0:
+                        print(f"    Step 0 - {agent_name}:")
+                        print(f"      Obs shape: {obs.shape}, Obs[0][:10]: {obs[0][:10] if len(obs.shape) > 1 else obs[:10]}")
+                        print(f"      Action (world 0): {actions[agent_name][0] if len(actions[agent_name].shape) > 1 else actions[agent_name]}")
+                        print(f"      log_std: {log_std.cpu().numpy()}")
+
             # Step environment
             obs_dict, rewards, terminated, truncated, info = env.step(actions)
+
+            # Debug: print positions after first step for verbose mode
+            if verbose and step == 0:
+                step_pos = np.asarray(raw_env.sim.data.states.pos[0])  # (n_drones, 3)
+                step_vel = np.asarray(raw_env.sim.data.states.vel[0])  # (n_drones, 3)
+                print(f"    After step 0:")
+                for i in range(n_blue):
+                    print(f"      Blue {i} pos: {step_pos[i]}, vel: {step_vel[i]}, alive: {raw_env.blue_alive[0, i]}")
+                for i in range(len(step_pos) - n_blue):
+                    print(f"      Red  {i} pos: {step_pos[n_blue + i]}, vel: {step_vel[n_blue + i]}, alive: {raw_env.red_alive[0, i]}")
+                print(f"      Boundary size: {env.cfg.boundary_size}, min_alt: {env.cfg.min_altitude}, max_alt: {env.cfg.max_altitude}")
 
             # rotor_vel = env.env.sim.data.states.rotor_vel
             # print(f"Rotor vel (RPM): {np.array(rotor_vel[0, :])}")
@@ -337,15 +458,19 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             for agent_name, reward in rewards.items():
                 episode_rewards[agent_name].append(reward)
 
-            # Accumulate termination events (rates are per-step, we want totals)
-            if "termination/bb_crash" in info:
-                episode_bb_crash += info["termination/bb_crash"] * n_worlds
-                episode_br_crash += info["termination/br_crash"] * n_worlds
-                episode_out_of_bounds += info["termination/out_of_bounds"] * n_worlds
+            # Accumulate collision events (info values are rates = count/n_worlds)
+            if "termination/bb_collision" in info:
+                episode_bb_collision += int(round(info["termination/bb_collision"] * n_worlds))
+                episode_rr_collision += int(round(info["termination/rr_collision"] * n_worlds))
+                episode_rb_collision += int(round(info["termination/rb_collision"] * n_worlds))
+                episode_out_of_bounds += int(round(info["termination/out_of_bounds"] * n_worlds))
 
-            # Check for done (any world terminated or truncated)
+            # Check for done (any world episode-terminated or truncated)
+            # Use episode_terminated from info (not per-agent terminated) since per-agent
+            # terminated is True when an individual agent dies, not when episode ends
             sample_agent = env.possible_agents[0]
-            done = terminated[sample_agent].any() or truncated[sample_agent].any()
+            episode_done = info.get("episode_terminated", terminated[sample_agent])
+            done = episode_done.any() or truncated[sample_agent].any()
             step += 1
 
             # Render/record if requested
@@ -378,13 +503,12 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                     if total_episodes_completed > 0:
                         blue_win_rate = blue_wins / total_episodes_completed * 100
                         red_win_rate = red_wins / total_episodes_completed * 100
-                        oob_rate = out_of_bounds_count / total_episodes_completed * 100
                     else:
-                        blue_win_rate = red_win_rate = oob_rate = 0.0
+                        blue_win_rate = red_win_rate = 0.0
                     viewer.add_overlay(
                         mujoco.mjtGridPos.mjGRID_TOPLEFT,
                         "Win Rates",
-                        f"Blue: {blue_win_rate:.1f}%  Red: {red_win_rate:.1f}%  OOB: {oob_rate:.1f}%"
+                        f"Blue: {blue_win_rate:.1f}%  Red: {red_win_rate:.1f}%"
                     )
                     viewer.add_overlay(
                         mujoco.mjtGridPos.mjGRID_TOPLEFT,
@@ -429,6 +553,20 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                         "  ".join(red_status)
                     )
 
+                    # Red target assignments
+                    red_targets = np.asarray(raw_env.red_target[0])  # (n_red,) target indices
+                    target_status = []
+                    for i in range(len(red_alive)):
+                        if red_alive[i]:
+                            target_status.append(f"R{i}→B{red_targets[i]}")
+                        else:
+                            target_status.append(f"R{i}→✗")
+                    viewer.add_overlay(
+                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                        "Targets",
+                        "  ".join(target_status)
+                    )
+
                 if recording:
                     # Capture frame for recording
                     frame = env.render()
@@ -454,6 +592,12 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                         for i in range(n_red_drones):
                             pos = initial_pos[n_blue + i]
                             lines.append(f"R{i} init: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
+
+                        # Add target assignments
+                        red_targets = np.asarray(raw_env.red_target[0])
+                        red_alive_rec = np.asarray(raw_env.red_alive[0])
+                        target_strs = [f"R{i}→B{red_targets[i]}" if red_alive_rec[i] else f"R{i}→✗" for i in range(n_red_drones)]
+                        lines.append("Targets: " + "  ".join(target_strs))
 
                         # Draw text with background
                         y_offset = 20
@@ -498,27 +642,42 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             # Determine termination reason and update win rate tracking
             all_red_dead = not final_red_alive[world_idx].any()
             all_blue_dead = not final_blue_alive[world_idx].any()
+            is_truncated = truncated[sample_agent][world_idx]
+            is_terminated = terminated[sample_agent][world_idx]
 
-            if truncated[sample_agent][world_idx]:
-                reason = "survived"  # Reached max steps
-            elif all_red_dead and not all_blue_dead:
+            # Check termination conditions first (takes precedence over truncation)
+            if all_red_dead and not all_blue_dead:
                 reason = "blue_won"  # All reds eliminated, blues survive
                 blue_wins += 1
-            elif episode_br_crash[world_idx] > 0:
-                reason = "captured"  # Blue-red collision (blue captured)
+            elif all_blue_dead:
+                reason = "red_won"  # All blues eliminated
                 red_wins += 1
-            elif episode_bb_crash[world_idx] > 0:
-                reason = "blue_crashed"  # Blue-blue collision
-                red_wins += 1
-            elif episode_out_of_bounds[world_idx] > 0:
-                reason = "out_of_bounds"  # Boundary violation
-                out_of_bounds_count += 1
-                red_wins += 1
+            elif is_truncated and not is_terminated:
+                reason = "timeout"  # Reached max steps without termination
             else:
                 reason = "unknown"
 
             all_termination_reasons.append(reason)
             total_episodes_completed += 1
+
+            # Verbose output for debugging
+            if verbose:
+                blue_alive_str = "".join(["B" if a else "." for a in final_blue_alive[world_idx]])
+                red_alive_str = "".join(["R" if a else "." for a in final_red_alive[world_idx]])
+                # Also check what the env's last_termination_events says
+                env_blue_win = raw_env.last_termination_events.get("blue_win", 0)
+                env_red_win = raw_env.last_termination_events.get("red_win", 0)
+                env_max_steps = raw_env.last_termination_events.get("max_steps", 0)
+                print(f"    Episode {total_episodes_completed}: {reason} | "
+                      f"steps={step} | blue={blue_alive_str} red={red_alive_str} | "
+                      f"return={episode_return:.2f} | "
+                      f"env_events: blue_win={env_blue_win:.2f} red_win={env_red_win:.2f} max_steps={env_max_steps:.2f}")
+
+        # Accumulate collision stats for this episode batch
+        total_bb_collision += episode_bb_collision
+        total_rr_collision += episode_rr_collision
+        total_rb_collision += episode_rb_collision
+        total_out_of_bounds += episode_out_of_bounds
 
         episodes_completed += n_worlds
         print(f"  Completed {min(episodes_completed, n_episodes)}/{n_episodes} episodes")
@@ -530,11 +689,9 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 
     # Compute termination reason counts
     reason_counts = {
-        "survived": sum(1 for r in all_termination_reasons if r == "survived"),
         "blue_won": sum(1 for r in all_termination_reasons if r == "blue_won"),
-        "captured": sum(1 for r in all_termination_reasons if r == "captured"),
-        "blue_crashed": sum(1 for r in all_termination_reasons if r == "blue_crashed"),
-        "out_of_bounds": sum(1 for r in all_termination_reasons if r == "out_of_bounds"),
+        "red_won": sum(1 for r in all_termination_reasons if r == "red_won"),
+        "timeout": sum(1 for r in all_termination_reasons if r == "timeout"),
         "unknown": sum(1 for r in all_termination_reasons if r == "unknown"),
     }
 
@@ -554,11 +711,19 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             "max": float(np.max(all_rewards)),
         },
         "termination_reasons": {
-            "survived": reason_counts["survived"] / n_episodes,
             "blue_won": reason_counts["blue_won"] / n_episodes,
-            "captured": reason_counts["captured"] / n_episodes,
-            "blue_crashed": reason_counts["blue_crashed"] / n_episodes,
-            "out_of_bounds": reason_counts["out_of_bounds"] / n_episodes,
+            "red_won": reason_counts["red_won"] / n_episodes,
+            "timeout": reason_counts["timeout"] / n_episodes,
+        },
+        "collision_stats": {
+            "bb_collision_total": int(total_bb_collision),
+            "rr_collision_total": int(total_rr_collision),
+            "rb_collision_total": int(total_rb_collision),
+            "out_of_bounds_total": int(total_out_of_bounds),
+            "bb_collision_per_episode": float(total_bb_collision / n_episodes),
+            "rr_collision_per_episode": float(total_rr_collision / n_episodes),
+            "rb_collision_per_episode": float(total_rb_collision / n_episodes),
+            "out_of_bounds_per_episode": float(total_out_of_bounds / n_episodes),
         },
     }
 
@@ -575,8 +740,19 @@ def main():
     """Main evaluation function."""
     args = parse_args()
 
+    # Set random seeds for reproducibility
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        # JAX uses a functional random API, so we set the global key used by the env
+        # The env will use np.random internally for spawn randomization
+        print(f"Random seed: {args.seed}")
+
     # Resolve checkpoint path
-    checkpoint_path = resolve_checkpoint(args.experiment, args.checkpoint)
+    checkpoint_path = resolve_checkpoint(args.experiment, args.checkpoint, args.step)
     print(f"Experiment: {args.experiment}")
     print(f"Using checkpoint: {checkpoint_path}")
 
@@ -584,19 +760,31 @@ def main():
     env_config, learning_config = load_configs(checkpoint_path)
     n_pairs = env_config["n_pairs"]
     pursuer_strategy = env_config["pursuer_strategy"]
-    drone_model = env_config.get("drone_model", "cf2x")
+    drone_model = env_config.get("drone_model", "cf2x_T350")
     # Support old (hidden_sizes) and new (policy_net_sizes) format
     if "policy_net_sizes" in env_config:
         hidden_sizes = env_config["policy_net_sizes"]
     else:
         hidden_sizes = env_config.get("hidden_sizes", [256, 256])
 
+    # Get policy activation function
+    policy_activation = env_config.get("policy_activation", "relu")
+
+    # Get control limits and mass from saved config
+    roll_pitch_max = env_config.get("roll_pitch_max", 0.5)
+    yaw_max = env_config.get("yaw_max", 0.1)
+    mass = env_config.get("mass", None)
+
     print(f"Loading checkpoint from: {checkpoint_path}")
     print(f"Environment configuration:")
     print(f"  - n_pairs: {n_pairs}")
     print(f"  - pursuer_strategy: {pursuer_strategy}")
     print(f"  - policy_net_sizes: {hidden_sizes}")
+    print(f"  - policy_activation: {policy_activation}")
     print(f"  - drone_model: {drone_model}")
+    print(f"  - roll_pitch_max: {roll_pitch_max}")
+    print(f"  - yaw_max: {yaw_max}")
+    print(f"  - mass: {mass}")
     print(f"Evaluation configuration:")
     print(f"  - n_worlds: {args.n_worlds}")
     print(f"  - n_episodes: {args.n_episodes}")
@@ -618,10 +806,10 @@ def main():
         control_freq=env_config.get("control_freq", 100),
         sim_freq=env_config.get("sim_freq", 500),
         mellinger_freq=env_config.get("mellinger_freq", 500),
-        # Crash tolerances
-        bb_crash_tolerance=env_config.get("bb_crash_tolerance", 0.2),
-        rr_crash_tolerance=env_config.get("rr_crash_tolerance", 0.2),
-        br_crash_tolerance=env_config.get("br_crash_tolerance", 0.2),
+        # Collision tolerances (try new names first, fall back to old names for backwards compat)
+        bb_collision_tolerance=env_config.get("bb_collision_tolerance", env_config.get("bb_crash_tolerance", 0.2)),
+        rr_collision_tolerance=env_config.get("rr_collision_tolerance", env_config.get("rr_crash_tolerance", 0.2)),
+        rb_collision_tolerance=env_config.get("rb_collision_tolerance", env_config.get("br_crash_tolerance", 0.2)),
         # Boundary settings
         boundary_size=env_config.get("boundary_size", 3.0),
         min_altitude=env_config.get("min_altitude", 0.1),
@@ -638,8 +826,22 @@ def main():
         N_gain=env_config.get("pursuit_gains", {}).get("N_gain", 3.0),
         V_min=env_config.get("pursuit_gains", {}).get("V_min", 0.5),
         K_v=env_config.get("pursuit_gains", {}).get("K_v", 2.5),
+        # Control limits
+        roll_pitch_max=roll_pitch_max,
+        yaw_max=yaw_max,
+        # Physical parameters
+        mass=mass,  # None uses drone_model default
         # Target assignment
         random_target_assignment=env_config.get("random_target_assignment", False),
+        # Domain randomization (from top-level config, can be overridden by curriculum levels)
+        randomize_mass=env_config.get("randomize_mass", False),
+        randomize_inertia=env_config.get("randomize_inertia", False),
+        mass_randomization_std=env_config.get("mass_randomization_std", 0.003),
+        inertia_randomization_std=env_config.get("inertia_randomization_std", 3e-6),
+        # Disturbance forces/torques
+        enable_disturbance=env_config.get("enable_disturbance", False),
+        disturbance_force_std=env_config.get("disturbance_force_std", 0.01),
+        disturbance_torque_std=env_config.get("disturbance_torque_std", 1e-4),
         # Rewards (from learning_config if available, else defaults)
         reward_capture=learning_config.get("rewards", {}).get("capture", -30.0) if learning_config else -30.0,
         reward_escape=learning_config.get("rewards", {}).get("escape", 20.0) if learning_config else 20.0,
@@ -671,12 +873,26 @@ def main():
         level_name = level_config.get("name", f"Level {args.level}")
         print(f"\nUsing curriculum level {args.level}: {level_name}")
 
-        # Apply level params to env_cfg
+        # Apply level params to env_cfg (with backwards compatibility for old param names)
         level_params = level_config.get("params", {})
+        has_old_names = False
         for param_name, param_value in level_params.items():
-            if hasattr(env_cfg, param_name):
-                setattr(env_cfg, param_name, param_value)
-                print(f"  {param_name}: {param_value}")
+            # Translate old param names to new ones
+            translated_name = translate_param_name(param_name)
+            if translated_name != param_name:
+                has_old_names = True
+
+            if hasattr(env_cfg, translated_name):
+                setattr(env_cfg, translated_name, param_value)
+                if translated_name != param_name:
+                    print(f"  {param_name} -> {translated_name}: {param_value}")
+                else:
+                    print(f"  {param_name}: {param_value}")
+            else:
+                print(f"  Warning: Unknown param '{param_name}' (translated: '{translated_name}'), skipping")
+
+        if has_old_names:
+            print("  Note: Config uses old parameter names (*_crash_tolerance), translated to new names (*_collision_tolerance)")
 
         # Use level's spawn config
         spawn_config = level_config.get("spawn", {})
@@ -686,6 +902,17 @@ def main():
 
     # Create spawn function from config
     spawn_fn = create_spawn_fn_from_config(spawn_config)
+
+    # Print final configuration for diagnostic purposes
+    print(f"\nFinal environment configuration:")
+    print(f"  Collision tolerances: bb={env_cfg.bb_collision_tolerance}, rr={env_cfg.rr_collision_tolerance}, rb={env_cfg.rb_collision_tolerance}")
+    print(f"  Domain randomization: mass={env_cfg.randomize_mass}, inertia={env_cfg.randomize_inertia}")
+    if env_cfg.randomize_mass or env_cfg.randomize_inertia:
+        print(f"    mass_std={env_cfg.mass_randomization_std}, inertia_std={env_cfg.inertia_randomization_std}")
+    print(f"  Disturbances: enabled={env_cfg.enable_disturbance}")
+    if env_cfg.enable_disturbance:
+        print(f"    force_std={env_cfg.disturbance_force_std}, torque_std={env_cfg.disturbance_torque_std}")
+    print(f"  Boundary: size={env_cfg.boundary_size}, alt=[{env_cfg.min_altitude}, {env_cfg.max_altitude}]")
 
     # Validate recording settings and construct video path
     record_path = None
@@ -735,6 +962,7 @@ def main():
         action_space=sample_action_space,
         device=device,
         hidden_sizes=tuple(hidden_sizes),
+        activation=policy_activation,
     )
 
     # Load checkpoint
@@ -807,6 +1035,7 @@ def main():
         cam_azimuth=args.cam_azimuth,
         cam_elevation=args.cam_elevation,
         cam_lookat=tuple(args.cam_lookat),
+        verbose=args.verbose,
     )
 
     # Print results
@@ -825,11 +1054,14 @@ def main():
     print(f"  Min:  {metrics['episode_return']['min']:.2f}")
     print(f"  Max:  {metrics['episode_return']['max']:.2f}")
     print(f"\nTermination Reasons:")
-    print(f"  Survived:      {metrics['termination_reasons']['survived']*100:.1f}%")
-    print(f"  Blue Won:      {metrics['termination_reasons']['blue_won']*100:.1f}%")
-    print(f"  Captured:      {metrics['termination_reasons']['captured']*100:.1f}%")
-    print(f"  Blue Crashed:  {metrics['termination_reasons']['blue_crashed']*100:.1f}%")
-    print(f"  Out of Bounds: {metrics['termination_reasons']['out_of_bounds']*100:.1f}%")
+    print(f"  Blue Won:  {metrics['termination_reasons']['blue_won']*100:.1f}%")
+    print(f"  Red Won:   {metrics['termination_reasons']['red_won']*100:.1f}%")
+    print(f"  Timeout:   {metrics['termination_reasons']['timeout']*100:.1f}%")
+    print(f"\nCollision Stats (total / per episode):")
+    print(f"  Blue-Blue Crashes:  {metrics['collision_stats']['bb_collision_total']} / {metrics['collision_stats']['bb_collision_per_episode']:.2f}")
+    print(f"  Red-Red Crashes:    {metrics['collision_stats']['rr_collision_total']} / {metrics['collision_stats']['rr_collision_per_episode']:.2f}")
+    print(f"  Blue-Red Crashes:   {metrics['collision_stats']['rb_collision_total']} / {metrics['collision_stats']['rb_collision_per_episode']:.2f}")
+    print(f"  Out of Bounds:      {metrics['collision_stats']['out_of_bounds_total']} / {metrics['collision_stats']['out_of_bounds_per_episode']:.2f}")
     print("=" * 60)
 
     # Save results to JSON if requested

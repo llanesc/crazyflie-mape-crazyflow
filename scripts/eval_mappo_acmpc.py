@@ -45,34 +45,85 @@ from crazyflie_mape_crazyflow.policies import (
 RESULTS_DIR = Path("results/acmpc")
 
 
+def parse_step_string(step_str: str) -> int:
+    """Parse step string like '500k', '1m', '1.5m', '2m' into integer.
+
+    Args:
+        step_str: Step string with optional k/m suffix (case-insensitive).
+
+    Returns:
+        Integer step value.
+
+    Raises:
+        ValueError: If string cannot be parsed.
+    """
+    step_str = step_str.strip().lower()
+
+    if step_str.endswith('m'):
+        # Million suffix
+        value = float(step_str[:-1])
+        return int(value * 1_000_000)
+    elif step_str.endswith('k'):
+        # Thousand suffix
+        value = float(step_str[:-1])
+        return int(value * 1_000)
+    else:
+        # Plain integer
+        return int(step_str)
+
+
 def find_checkpoints(search_dir: Path) -> list[Path]:
     """Find all checkpoint files in a directory.
 
-    Searches for best_agent.pt, final_checkpoint.pt, and agent_*.pt files.
+    Searches for best_agent_*.pt, final_checkpoint.pt, and agent_*.pt files.
+    Priority: best_agent_*.pt > final_checkpoint.pt > periodic checkpoints (by step number).
 
     Args:
         search_dir: Directory to search in.
 
     Returns:
-        List of checkpoint paths, sorted by modification time (newest first).
+        List of checkpoint paths, with best_agent first if it exists.
     """
     checkpoints = []
-    # Priority order: best_agent > final_checkpoint > periodic checkpoints
-    checkpoints.extend(search_dir.glob("**/best_agent.pt"))
-    checkpoints.extend(search_dir.glob("**/final_checkpoint.pt"))
-    checkpoints.extend(search_dir.glob("**/checkpoints/agent_*.pt"))
-    # Sort by modification time, newest first
-    checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def get_step(p: Path) -> int:
+        """Extract step number from filename."""
+        try:
+            # Handle both best_agent_12345.pt and agent_12345.pt
+            return int(p.stem.split("_")[-1])
+        except (IndexError, ValueError):
+            return 0
+
+    # Priority 1: best_agent_*.pt (always preferred)
+    best_agents = list(search_dir.glob("**/best_agent_*.pt"))
+    if best_agents:
+        # Sort by step number (highest first)
+        best_agents.sort(key=get_step, reverse=True)
+        checkpoints.extend(best_agents)
+
+    # Priority 2: final_checkpoint.pt
+    final_checkpoints = list(search_dir.glob("**/final_checkpoint.pt"))
+    if final_checkpoints:
+        final_checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        checkpoints.extend(final_checkpoints)
+
+    # Priority 3: periodic checkpoints (sorted by step number, highest first)
+    periodic = list(search_dir.glob("**/checkpoints/agent_*.pt"))
+    periodic.sort(key=get_step, reverse=True)
+    checkpoints.extend(periodic)
+
     return checkpoints
 
 
-def resolve_checkpoint(experiment: str, checkpoint_arg: str | None) -> Path:
+def resolve_checkpoint(experiment: str, checkpoint_arg: str | None, step: str | None = None) -> Path:
     """Resolve checkpoint path from argument.
 
     Args:
         experiment: Experiment name (e.g., "box_random_spawn").
         checkpoint_arg: Either None (find latest), run folder name (e.g., "run_12345678"),
             or full checkpoint file path.
+        step: Optional step string (e.g., "500k", "1m", "1.5m", "2m") to load a specific
+            periodic checkpoint. Only used when checkpoint_arg is a run folder name.
 
     Returns:
         Path to the checkpoint file.
@@ -101,17 +152,35 @@ def resolve_checkpoint(experiment: str, checkpoint_arg: str | None) -> Path:
 
     # If it's already a valid file path, use it directly
     if checkpoint_path.exists() and checkpoint_path.is_file():
+        if step is not None:
+            print(f"Warning: --step ignored when checkpoint is a file path")
         return checkpoint_path
 
     # Try as run folder name in results directory (e.g., "run_12345678")
     run_dir = results_dir / checkpoint_arg
     if run_dir.exists() and run_dir.is_dir():
+        # If step is specified, look for that specific checkpoint
+        if step is not None:
+            step_num = parse_step_string(step)
+            checkpoint_file = run_dir / "checkpoints" / f"agent_{step_num}.pt"
+            if checkpoint_file.exists():
+                return checkpoint_file
+            # Also try without checkpoints subdirectory
+            checkpoint_file_alt = run_dir / f"agent_{step_num}.pt"
+            if checkpoint_file_alt.exists():
+                return checkpoint_file_alt
+            raise FileNotFoundError(
+                f"Checkpoint for step {step} ({step_num}) not found in {run_dir}. "
+                f"Tried: {checkpoint_file} and {checkpoint_file_alt}"
+            )
+
+        # No step specified, use priority search
         checkpoints = find_checkpoints(run_dir)
         if checkpoints:
             return checkpoints[0]
         raise FileNotFoundError(
             f"No checkpoint found in {run_dir}. "
-            "Expected best_agent.pt, final_checkpoint.pt, or checkpoints/agent_*.pt"
+            "Expected best_agent_*.pt, final_checkpoint.pt, or checkpoints/agent_*.pt"
         )
 
     raise FileNotFoundError(
@@ -129,6 +198,7 @@ def parse_args():
 Example:
     python scripts/eval_mappo_acmpc.py --experiment box_random_spawn
     python scripts/eval_mappo_acmpc.py --experiment box_random_spawn --checkpoint run_12345678
+    python scripts/eval_mappo_acmpc.py --experiment box_random_spawn --checkpoint run_12345678 --step 1m
         """,
     )
 
@@ -139,6 +209,11 @@ Example:
     # Checkpoint (optional - will find latest if not specified)
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Run folder name (e.g., 'run_12345678') or full path. Omit for latest.")
+
+    # Step selection (optional - load specific checkpoint step)
+    parser.add_argument("--step", type=str, default=None,
+                        help="Checkpoint step to load (e.g., '500k', '1m', '1.5m', '2m'). "
+                             "Requires --checkpoint to specify run folder.")
 
     # Environment settings (only n_worlds and device can be changed for eval)
     parser.add_argument("--n-worlds", type=int, default=1, help="Number of parallel environments")
@@ -307,8 +382,8 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
         last_render_time = time.perf_counter() if render else None
 
         # Track cumulative termination events per world
-        episode_bb_crash = np.zeros(n_worlds)
-        episode_br_crash = np.zeros(n_worlds)
+        episode_bb_collision = np.zeros(n_worlds)
+        episode_rb_collision = np.zeros(n_worlds)
         episode_out_of_bounds = np.zeros(n_worlds)
 
         done = False
@@ -337,9 +412,9 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                 episode_rewards[agent_name].append(reward)
 
             # Accumulate termination events (rates are per-step, we want totals)
-            if "termination/bb_crash" in info:
-                episode_bb_crash += info["termination/bb_crash"] * n_worlds
-                episode_br_crash += info["termination/br_crash"] * n_worlds
+            if "termination/bb_collision" in info:
+                episode_bb_collision += info["termination/bb_collision"] * n_worlds
+                episode_rb_collision += info["termination/rb_collision"] * n_worlds
                 episode_out_of_bounds += info["termination/out_of_bounds"] * n_worlds
 
             # Check for done (any world terminated or truncated)
@@ -428,6 +503,20 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                         "  ".join(red_status)
                     )
 
+                    # Red target assignments
+                    red_targets = np.asarray(raw_env.red_target[0])  # (n_red,)
+                    target_status = []
+                    for i in range(len(red_alive)):
+                        if red_alive[i]:
+                            target_status.append(f"R{i}→B{red_targets[i]}")
+                        else:
+                            target_status.append(f"R{i}→✗")
+                    viewer.add_overlay(
+                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                        "Targets",
+                        "  ".join(target_status)
+                    )
+
                 if recording:
                     # Capture frame for recording
                     frame = env.render()
@@ -453,6 +542,17 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                         for i in range(n_red_drones):
                             pos = initial_pos[n_blue + i]
                             lines.append(f"R{i} init: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
+
+                        # Add target assignments
+                        red_targets = np.asarray(raw_env.red_target[0])  # (n_red,)
+                        red_alive = np.asarray(raw_env.red_alive[0])  # (n_red,)
+                        target_strs = []
+                        for i in range(n_red_drones):
+                            if red_alive[i]:
+                                target_strs.append(f"R{i}→B{red_targets[i]}")
+                            else:
+                                target_strs.append(f"R{i}→✗")
+                        lines.append(f"Targets: {' '.join(target_strs)}")
 
                         # Draw text with background
                         y_offset = 20
@@ -503,10 +603,10 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             elif all_red_dead and not all_blue_dead:
                 reason = "blue_won"  # All reds eliminated, blues survive
                 blue_wins += 1
-            elif episode_br_crash[world_idx] > 0:
+            elif episode_rb_collision[world_idx] > 0:
                 reason = "captured"  # Blue-red collision (blue captured)
                 red_wins += 1
-            elif episode_bb_crash[world_idx] > 0:
+            elif episode_bb_collision[world_idx] > 0:
                 reason = "blue_crashed"  # Blue-blue collision
                 red_wins += 1
             elif episode_out_of_bounds[world_idx] > 0:
@@ -575,7 +675,7 @@ def main():
     args = parse_args()
 
     # Resolve checkpoint path
-    checkpoint_path = resolve_checkpoint(args.experiment, args.checkpoint)
+    checkpoint_path = resolve_checkpoint(args.experiment, args.checkpoint, args.step)
     print(f"Experiment: {args.experiment}")
     print(f"Using checkpoint: {checkpoint_path}")
 
@@ -584,7 +684,7 @@ def main():
     n_pairs = env_config["n_pairs"]
     pursuer_strategy = env_config["pursuer_strategy"]
     mpc_horizon = env_config.get("mpc_horizon", 2)
-    drone_model = env_config.get("drone_model", "cf2x")
+    drone_model = env_config.get("drone_model", "cf2x_T350")
     # Support old (hidden_dim/hidden_sizes) and new (cost_net_sizes) format
     if "cost_net_sizes" in env_config:
         hidden_dim = env_config["cost_net_sizes"][0]
@@ -598,6 +698,14 @@ def main():
     # Get MPC velocity constraint
     mpc_velocity_max = env_config.get("mpc_velocity_max", None)
 
+    # Get cost network activation
+    cost_net_activation = env_config.get("cost_net_activation", "relu")
+
+    # Get control limits and mass from saved config
+    roll_pitch_max = env_config.get("roll_pitch_max", 0.5)
+    yaw_max = env_config.get("yaw_max", 0.5)
+    mass = env_config.get("mass", None)
+
     print(f"Loading checkpoint from: {checkpoint_path}")
     print(f"Environment configuration:")
     print(f"  - n_pairs: {n_pairs}")
@@ -605,7 +713,11 @@ def main():
     print(f"  - mpc_horizon: {mpc_horizon}")
     print(f"  - mpc_velocity_max: {mpc_velocity_max}")
     print(f"  - cost_net_sizes: [{hidden_dim}, {hidden_dim}]")
+    print(f"  - cost_net_activation: {cost_net_activation}")
     print(f"  - drone_model: {drone_model}")
+    print(f"  - roll_pitch_max: {roll_pitch_max}")
+    print(f"  - yaw_max: {yaw_max}")
+    print(f"  - mass: {mass}")
     print(f"Evaluation configuration:")
     print(f"  - n_worlds: {args.n_worlds}")
     print(f"  - n_episodes: {args.n_episodes}")
@@ -629,9 +741,9 @@ def main():
         sim_freq=env_config.get("sim_freq", 500),
         mellinger_freq=env_config.get("mellinger_freq", 500),
         # Crash tolerances
-        bb_crash_tolerance=env_config.get("bb_crash_tolerance", 0.2),
-        rr_crash_tolerance=env_config.get("rr_crash_tolerance", 0.2),
-        br_crash_tolerance=env_config.get("br_crash_tolerance", 0.2),
+        bb_collision_tolerance=env_config.get("bb_collision_tolerance", 0.2),
+        rr_collision_tolerance=env_config.get("rr_collision_tolerance", 0.2),
+        rb_collision_tolerance=env_config.get("rb_collision_tolerance", 0.2),
         # Boundary settings
         boundary_size=env_config.get("boundary_size", 3.0),
         min_altitude=env_config.get("min_altitude", 0.1),
@@ -648,6 +760,11 @@ def main():
         N_gain=env_config.get("pursuit_gains", {}).get("N_gain", 3.0),
         V_min=env_config.get("pursuit_gains", {}).get("V_min", 0.5),
         K_v=env_config.get("pursuit_gains", {}).get("K_v", 2.5),
+        # Control limits
+        roll_pitch_max=roll_pitch_max,
+        yaw_max=yaw_max,
+        # Physical parameters
+        mass=mass,  # None uses drone_model default
         # Target assignment
         random_target_assignment=env_config.get("random_target_assignment", False),
         # Rewards (from learning_config if available, else defaults)
@@ -739,13 +856,11 @@ def main():
     print(f"Observation space: {sample_obs_space}")
     print(f"Action space: {sample_action_space}")
 
-    # Get control limits from config (with defaults for backwards compatibility)
-    # Default values from leap_c/quadrotor_ocp.py: MAX_ROLL_PITCH = 0.5, MAX_YAW = 0.5
-    max_roll_pitch = env_config.get("max_roll_pitch", 0.5)
-    max_yaw = env_config.get("max_yaw", 0.5)
+    # Get MPC dt from config
     mpc_dt = env_config.get("mpc_dt", 0.01)
 
     # Create policy (same architecture as training)
+    # Note: roll_pitch_max, yaw_max, and cost_net_activation were loaded earlier
     shared_policy = LeapCSharedGaussianPolicy(
         observation_space=sample_obs_space,
         action_space=sample_action_space,
@@ -753,10 +868,11 @@ def main():
         mpc_horizon=mpc_horizon,
         mpc_dt=mpc_dt,
         hidden_dim=hidden_dim,
-        roll_pitch_max=max_roll_pitch,
-        yaw_max=max_yaw,
+        roll_pitch_max=roll_pitch_max,
+        yaw_max=yaw_max,
         drone_model=drone_model,
         velocity_max=mpc_velocity_max,
+        activation=cost_net_activation,
         verbose=False,
     )
 

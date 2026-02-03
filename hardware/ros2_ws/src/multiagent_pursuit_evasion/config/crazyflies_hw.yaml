@@ -3,34 +3,34 @@ fileversion: 3
 
 robots:
   blue_1:
-      enabled: true
-      uri: udp://0.0.0.0:19850
-      initial_position: [0.0, 0.0, 0.0]
-      type: cf_sim
-
+    enabled: true
+    uri: radio://0/80/2M/E7E7E7E7E0
+    initial_position: [2.0, -0.25, 0.0]
+    type: cf_blue_hw  # see robot_types
+  
   blue_2:
     enabled: true
-    uri: udp://0.0.0.0:19851
-    initial_position: [1.0, 0.0, 0.0]
-    type: cf_sim
+    uri: radio://0/80/2M/E7E7E7E7E1
+    initial_position: [2.0, 0.25, 0.0]
+    type: cf_blue_hw  # see robot_types
 
   red_1:
     enabled: true
-    uri: udp://0.0.0.0:19852
-    initial_position: [1.0, 0.0, 0.0]
-    type: cf_sim
-  
+    uri: radio://1/82/2M/E7E7E7E7E2
+    initial_position: [-0.24, -0.64, 0.0] # 1.19
+    type: cf_red_hw  # see robot_types
+
   red_2:
     enabled: true
-    uri: udp://0.0.0.0:19853
-    initial_position: [1.0, 0.0, 0.0]
-    type: cf_sim
+    uri: radio://1/82/2M/E7E7E7E7E3
+    initial_position: [-0.23, -0.18, 0.0] #1.04
+    type: cf_red_hw  # see robot_types
 
-  cf231:
-    enabled: false
-    uri: radio://0/80/2M/E7E7E7E7E7
-    initial_position: [0.0, 0.0, 0.0]
-    type: cf21  # see robot_types
+  # cf231:
+  #   enabled: false
+  #   uri: radio://0/80/2M/E7E7E7E7E7
+  #   initial_position: [0.0, 0.0, 0.0]
+  #   type: cf21  # see robot_types
     # firmware_params:
     #   kalman:
     #     pNAcc_xy: 1.0 # default 0.5
@@ -42,11 +42,11 @@ robots:
     #       vars: ["acc.x", "acc.y"]
     # reference_frame: "odom_cf231" # use a custom reference frame if no global coordinate system is available
 
-  cf5:
-    enabled: false
-    uri: radio://0/80/2M/E7E7E7E705
-    initial_position: [0.0, -0.5, 0.0]
-    type: cf21  # see robot_types
+  # cf5:
+  #   enabled: false
+  #   uri: radio://0/80/2M/E7E7E7E705
+  #   initial_position: [0.0, -0.5, 0.0]
+  #   type: cf21  # see robot_types
     # firmware_params:
     #   kalman:
     #     pNAcc_xy: 1.0 # default 0.5
@@ -59,48 +59,67 @@ robots:
 
 # Definition of the various robot types
 robot_types:
-  cf_blue_sim:
+  cf_blue_hw:
     motion_capture:
-      tracking: "vendor"
-    big_quad: false
-    firmware_logging:
-      enabled: true
-      default_topics:
-        odom:
-          frequency: 100
-        # pose:
-        #   frequency: 100
-      angular_velocity:
-        velocity:
-          frequency: 100
-          vars: ["stateEstimateZ.rollRate", "stateEstimateZ.pitchRate", "stateEstimateZ.yawRate"]
-
-  cf_red_sim:
-    motion_capture:
-      tracking: "vendor"
-    big_quad: false
-    firmware_logging:
-      enabled: true
-      default_topics:
-        odom:
-          frequency: 100
-        # pose:
-        #   frequency: 100
-      angular_velocity:
-        velocity:
-          frequency: 100
-          vars: ["stateEstimateZ.rollRate", "stateEstimateZ.pitchRate", "stateEstimateZ.yawRate"]
-
-  cf21:
-    motion_capture:
-      tracking: "librigidbodytracker" # one of "vendor", "librigidbodytracker"
-      # only if enabled; see motion_capture.yaml
+      tracking: "librigidbodytracker"
       marker: default_single_marker
       dynamics: default
     big_quad: false
     battery:
       voltage_warning: 3.8  # V
       voltage_critical: 3.7 # V
+    firmware_logging:
+      enabled: true
+      default_topics:
+        odom:
+          frequency: 100
+      custom_topics:
+        body_rates:
+          frequency: 100
+          vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
+        accel:
+          frequency: 50
+          vars: ["stateEstimateZ.ax", "stateEstimateZ.ay", "stateEstimateZ.az"]
+    firmware_params:
+      ring:
+        effect: 7 # 6: double spinner, 7: solid color, 16: packetRate
+        solidBlue: 255 # if set to solid color
+        solidGreen: 0 # if set to solid color
+        solidRed: 0 # if set to solid color
+        headlightEnable: 0
+
+  cf_red_hw:
+    motion_capture:
+      tracking: "librigidbodytracker"
+      marker: default_single_marker
+      dynamics: default
+    big_quad: false
+    battery:
+      voltage_warning: 3.8  # V
+      voltage_critical: 3.7 # V
+    firmware_logging:
+      enabled: true
+      default_topics:
+        odom:
+          frequency: 50
+    firmware_params:
+      ring:
+        effect: 7 # 6: double spinner, 7: solid color, 16: packetRate
+        solidBlue: 0 # if set to solid color
+        solidGreen: 0 # if set to solid color
+        solidRed: 255 # if set to solid color
+        headlightEnable: 0
+
+  # cf21:
+  #   motion_capture:
+  #     tracking: "librigidbodytracker" # one of "vendor", "librigidbodytracker"
+  #     # only if enabled; see motion_capture.yaml
+  #     marker: default_single_marker
+  #     dynamics: default
+  #   big_quad: false
+  #   battery:
+  #     voltage_warning: 3.8  # V
+  #     voltage_critical: 3.7 # V
     # firmware_params:
     #   kalman:
     #     pNAcc_xy: 1.0 # default 0.5
@@ -115,16 +134,16 @@ robot_types:
     #      vars: ["acc.x", "acc.y", "acc.z"]
     # reference_frame: "odom" 
 
-  cf21_mocap_deck:
-    motion_capture:
-      tracking: "librigidbodytracker" # one of "vendor", "librigidbodytracker"
-      # only if enabled; see motion_capture.yaml
-      marker: mocap_deck
-      dynamics: default
-    big_quad: false
-    battery:
-      voltage_warning: 3.8  # V
-      voltage_critical: 3.7 # V
+  # cf21_mocap_deck:
+  #   motion_capture:
+  #     tracking: "librigidbodytracker" # one of "vendor", "librigidbodytracker"
+  #     # only if enabled; see motion_capture.yaml
+  #     marker: mocap_deck
+  #     dynamics: default
+  #   big_quad: false
+  #   battery:
+  #     voltage_warning: 3.8  # V
+  #     voltage_critical: 3.7 # V
     # firmware_params:
     #   kalman:
     #     pNAcc_xy: 1.0 # default 0.5
@@ -165,11 +184,11 @@ all:
       enHighLevel: 1
     stabilizer:
       estimator: 2 # 1: complementary, 2: kalman
-      controller: 2 # 1: PID, 2: mellinger
+      controller: 1 # 1: PID, 2: mellinger
     flightmode:
       stabModeRoll: 1
       stabModePitch: 1
-      stabModeYaw: 1
+      stabModeYaw: 0
     # ring:
     #   effect: 16 # 6: double spinner, 7: solid color, 16: packetRate
     #   solidBlue: 255 # if set to solid color
@@ -179,8 +198,8 @@ all:
     locSrv:
       extPosStdDev: 1e-3
       extQuatStdDev: 0.5e-1
-    # kalman:
-    #   resetEstimation: 1
+    kalman:
+      resetEstimation: 1
   # reference frame for on-board state-estimate of all drones (use robot_types/type_name to set per type, or
   # robots/drone_name to set per drone)
   reference_frame: "world"
