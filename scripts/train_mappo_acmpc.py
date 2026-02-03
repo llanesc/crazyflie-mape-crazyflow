@@ -377,6 +377,12 @@ Examples:
     parser.add_argument("--curriculum-level", type=int, default=None,
                         help="Curriculum level to start at (0-indexed). Required when using --resume-run with curriculum learning")
 
+    # Rendering options (SKRL 2.0 feature)
+    parser.add_argument("--render", action="store_true",
+                        help="Enable periodic rendering during training (slower but useful for debugging)")
+    parser.add_argument("--render-interval", type=int, default=10000,
+                        help="Render every N timesteps (default: 10000). Only used if --render is set")
+
     return parser.parse_args()
 
 
@@ -522,7 +528,9 @@ def main():
             spawn_fn = create_spawn_fn_from_config(initial_params["spawn"])
 
     # Create environment first (needed for obs_dim in config)
-    env = RedVsBlueEnv(cfg=env_cfg, spawn_fn=spawn_fn)
+    # Enable rendering if --render flag is set (SKRL 2.0 feature)
+    render_mode = "human" if args.render else None
+    env = RedVsBlueEnv(cfg=env_cfg, spawn_fn=spawn_fn, render_mode=render_mode)
     raw_env = env
 
     # Save environment config (parameters that define the environment/policy structure)
@@ -835,8 +843,11 @@ def main():
     total_timesteps = timesteps + initial_timestep
     trainer_cfg = {
         "timesteps": total_timesteps,
-        "headless": True,
+        "headless": not args.render,  # Enable rendering if --render flag is set
+        "render_interval": args.render_interval,  # SKRL 2.0: render every N timesteps
     }
+    if args.render:
+        print(f"Rendering enabled: rendering every {args.render_interval} timesteps")
 
     trainer = SequentialTrainer(
         env=env,
