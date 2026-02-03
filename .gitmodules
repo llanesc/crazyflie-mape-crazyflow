@@ -13,4 +13,5 @@
 	url = https://github.com/llanesc/crazyswarm2.git
 [submodule "external/skrl"]
 	path = external/skrl
-	url = https://github.com/Toni-SM/skrl.git
+	url = git@github.com:llanesc/skrl.git
+	branch = main
