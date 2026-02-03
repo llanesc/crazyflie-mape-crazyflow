@@ -18,8 +18,8 @@ class CurriculumLevel:
     Attributes:
         name: Human-readable name for this level.
         params: Dictionary of environment config parameters to override.
-            Can include any field from RedVsBlueEnvConfig (e.g., br_crash_tolerance,
-            bb_crash_tolerance, boundary_size, reward_capture, etc.).
+            Can include any field from RedVsBlueEnvConfig (e.g., rb_collision_tolerance,
+            bb_collision_tolerance, boundary_size, reward_capture, etc.).
         spawn: Spawn configuration dict for this level (optional).
     """
     name: str
@@ -104,6 +104,34 @@ class CurriculumManager:
                 when the level changes.
         """
         self._on_level_change_callbacks.append(callback)
+
+    def set_level(self, level: int, trigger_callbacks: bool = True):
+        """Set the curriculum to a specific level.
+
+        Useful for resuming training from a checkpoint at a specific level.
+
+        Args:
+            level: Level index to set (0-indexed).
+            trigger_callbacks: Whether to trigger level change callbacks.
+
+        Raises:
+            ValueError: If level is out of range.
+        """
+        if level < 0 or level >= len(self.config.levels):
+            raise ValueError(
+                f"Level {level} out of range. Valid range: 0-{len(self.config.levels) - 1}"
+            )
+
+        old_level = self.current_level
+        self.current_level = level
+        # Clear window when setting level to get fresh measurements
+        self.episode_outcomes.clear()
+
+        if trigger_callbacks and old_level != level:
+            for callback in self._on_level_change_callbacks:
+                callback(self.current_level, self.current_level_config)
+
+        print(f"[Curriculum] Set to level {level} ({self.current_level_config.name})")
 
     def check_advancement(self, win_rate: float) -> bool:
         """Check if win rate exceeds threshold and advance if so.
@@ -265,8 +293,8 @@ def load_curriculum_config(config: dict) -> Optional[CurriculumConfig]:
           levels:
             - name: "Easy"
               params:
-                br_crash_tolerance: 0.5
-                bb_crash_tolerance: 0.3
+                rb_collision_tolerance: 0.5
+                bb_collision_tolerance: 0.3
                 boundary_size: 4.0
               spawn:
                 method: "deterministic"
@@ -274,8 +302,8 @@ def load_curriculum_config(config: dict) -> Optional[CurriculumConfig]:
                 red_x: 2.0
             - name: "Hard"
               params:
-                br_crash_tolerance: 0.2
-                bb_crash_tolerance: 0.2
+                rb_collision_tolerance: 0.2
+                bb_collision_tolerance: 0.2
                 boundary_size: 3.0
     """
     curriculum_cfg = config.get("curriculum")

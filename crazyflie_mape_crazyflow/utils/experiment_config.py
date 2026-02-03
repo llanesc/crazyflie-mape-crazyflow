@@ -73,12 +73,12 @@ def config_to_env_config(config: dict, device: str | None = None) -> RedVsBlueEn
         kwargs["episode_length_s"] = env_cfg["episode_length_s"]
 
     # Collision tolerances
-    if "bb_crash_tolerance" in env_cfg:
-        kwargs["bb_crash_tolerance"] = env_cfg["bb_crash_tolerance"]
-    if "rr_crash_tolerance" in env_cfg:
-        kwargs["rr_crash_tolerance"] = env_cfg["rr_crash_tolerance"]
-    if "br_crash_tolerance" in env_cfg:
-        kwargs["br_crash_tolerance"] = env_cfg["br_crash_tolerance"]
+    if "bb_collision_tolerance" in env_cfg:
+        kwargs["bb_collision_tolerance"] = env_cfg["bb_collision_tolerance"]
+    if "rr_collision_tolerance" in env_cfg:
+        kwargs["rr_collision_tolerance"] = env_cfg["rr_collision_tolerance"]
+    if "rb_collision_tolerance" in env_cfg:
+        kwargs["rb_collision_tolerance"] = env_cfg["rb_collision_tolerance"]
 
     # Boundary settings
     if "boundary_size" in env_cfg:
@@ -118,6 +118,28 @@ def config_to_env_config(config: dict, device: str | None = None) -> RedVsBlueEn
     if "random_target_assignment" in env_cfg:
         kwargs["random_target_assignment"] = env_cfg["random_target_assignment"]
 
+    # Physical parameters (mass override)
+    if "mass" in env_cfg:
+        kwargs["mass"] = env_cfg["mass"]
+
+    # Domain randomization
+    if "randomize_mass" in env_cfg:
+        kwargs["randomize_mass"] = env_cfg["randomize_mass"]
+    if "randomize_inertia" in env_cfg:
+        kwargs["randomize_inertia"] = env_cfg["randomize_inertia"]
+    if "mass_randomization_std" in env_cfg:
+        kwargs["mass_randomization_std"] = env_cfg["mass_randomization_std"]
+    if "inertia_randomization_std" in env_cfg:
+        kwargs["inertia_randomization_std"] = env_cfg["inertia_randomization_std"]
+
+    # Disturbance forces/torques
+    if "enable_disturbance" in env_cfg:
+        kwargs["enable_disturbance"] = env_cfg["enable_disturbance"]
+    if "disturbance_force_std" in env_cfg:
+        kwargs["disturbance_force_std"] = env_cfg["disturbance_force_std"]
+    if "disturbance_torque_std" in env_cfg:
+        kwargs["disturbance_torque_std"] = env_cfg["disturbance_torque_std"]
+
     # Reward settings
     if "capture" in rewards_cfg:
         kwargs["reward_capture"] = rewards_cfg["capture"]
@@ -135,6 +157,18 @@ def config_to_env_config(config: dict, device: str | None = None) -> RedVsBlueEn
         kwargs["reward_pursuer_proximity"] = rewards_cfg["pursuer_proximity"]
     if "pursuer_proximity_decay" in rewards_cfg:
         kwargs["reward_pursuer_proximity_decay"] = rewards_cfg["pursuer_proximity_decay"]
+
+    # Angle and action penalties
+    if "angle_coef" in rewards_cfg:
+        kwargs["reward_angle_coef"] = rewards_cfg["angle_coef"]
+    if "velocity_coef" in rewards_cfg:
+        kwargs["reward_velocity_coef"] = rewards_cfg["velocity_coef"]
+    if "action_coef" in rewards_cfg:
+        kwargs["reward_action_coef"] = rewards_cfg["action_coef"]
+    if "action_smoothness_thrust" in rewards_cfg:
+        kwargs["reward_action_smoothness_thrust"] = rewards_cfg["action_smoothness_thrust"]
+    if "action_smoothness_rpy" in rewards_cfg:
+        kwargs["reward_action_smoothness_rpy"] = rewards_cfg["action_smoothness_rpy"]
 
     # Training settings (n_worlds and device)
     if "n_worlds" in training_cfg:

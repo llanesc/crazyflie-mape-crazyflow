@@ -28,9 +28,9 @@ class RedVsBlueEnvConfig:
         min_thrust: Minimum collective thrust [N] (loaded from drone_model).
         max_thrust: Maximum collective thrust [N] (loaded from drone_model).
 
-        bb_crash_tolerance: Blue-blue collision distance [m].
-        rr_crash_tolerance: Red-red collision distance [m].
-        br_crash_tolerance: Blue-red capture distance [m].
+        bb_collision_tolerance: Blue-blue collision distance [m].
+        rr_collision_tolerance: Red-red collision distance [m].
+        rb_collision_tolerance: Blue-red capture distance [m].
 
         boundary_size: Arena half-size [m].
         min_altitude: Minimum altitude [m].
@@ -78,16 +78,27 @@ class RedVsBlueEnvConfig:
     drone_model: str = "cf2x_L250"
     pursuer_strategy: str = "ProNav"  # "PP" or "ProNav"
 
-    # Physical parameters (computed from drone_model in __post_init__)
-    mass: float = field(init=False)
+    # Physical parameters (computed from drone_model in __post_init__, can be overridden)
+    mass: float | None = None  # If None, loaded from drone_model
     gravity: float = field(init=False)
     min_thrust: float = field(init=False)
     max_thrust: float = field(init=False)
 
+    # Domain randomization
+    randomize_mass: bool = False  # Randomize mass with normal distribution
+    randomize_inertia: bool = False  # Randomize inertia with normal distribution
+    mass_randomization_std: float = 2e-3  # Standard deviation for mass randomization [kg]
+    inertia_randomization_std: float = 3e-6  # Standard deviation for inertia randomization [kg*m^2]
+
+    # Disturbance forces/torques
+    enable_disturbance: bool = False  # Enable random disturbance forces and torques
+    disturbance_force_std: float = 0.01  # Standard deviation for force disturbance [N]
+    disturbance_torque_std: float = 1e-4  # Standard deviation for torque disturbance [Nm]
+
     # Collision tolerances
-    bb_crash_tolerance: float = 0.2
-    rr_crash_tolerance: float = 0.2
-    br_crash_tolerance: float = 0.2
+    bb_collision_tolerance: float = 0.2
+    rr_collision_tolerance: float = 0.2
+    rb_collision_tolerance: float = 0.2
 
     # Boundary settings
     boundary_size: float = 3.0
@@ -124,6 +135,17 @@ class RedVsBlueEnvConfig:
     reward_pursuer_proximity: float = 0.5  # Reward evaders when pursuers are close to each other
     reward_pursuer_proximity_decay: float = 2.0  # Exponential decay rate for pursuer proximity reward
 
+    # Angle penalty (penalizes orientation deviation from level flight)
+    reward_angle_coef: float = 0.04  # Coefficient for ||rpy|| penalty
+
+    # Action penalties (energy and smoothness)
+    reward_action_coef: float = 0.04  # Coefficient for thrust² penalty
+    reward_action_smoothness_thrust: float = 0.4  # Coefficient for (Δthrust)² penalty
+    reward_action_smoothness_rpy: float = 1.0  # Coefficient for (Δroll² + Δpitch² + Δyaw²) penalty
+
+    # Velocity penalty (penalizes high speeds)
+    reward_velocity_coef: float = 0.0  # Coefficient for ||velocity||² penalty
+
     # Target assignment
     random_target_assignment: bool = False  # Randomize red->blue target assignment at reset
 
@@ -137,12 +159,14 @@ class RedVsBlueEnvConfig:
         self.n_drones = self.n_blue + self.n_red
 
         # Load physical parameters from drone-models
-        drone_params = load_params("so_rpy", self.drone_model)
-        self.mass = float(drone_params["mass"])
+        drone_params = load_params("first_principles", self.drone_model)
+        # Use user-provided mass or load from drone_model
+        if self.mass is None:
+            self.mass = float(drone_params["mass"])
         self.gravity = float(np.abs(drone_params["gravity_vec"][2]))
         # self.min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
         # self.max_thrust = float(drone_params["thrust_max"]) * 4
-        self.min_thrust = self.mass * self.gravity * 0.5 
+        self.min_thrust = self.mass * self.gravity * 0.5
         self.max_thrust = self.mass * self.gravity * 1.5
 
     @property

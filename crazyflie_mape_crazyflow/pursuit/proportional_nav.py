@@ -10,6 +10,61 @@ from jax import Array
 
 from .pure_pursuit import pure_pursuit
 
+def pronav_with_axial(
+    pos_rb: Array,
+    vel_rb: Array,
+    vel_pursuer: Array,
+    N_gain: float = 5.0,
+    V_min: float = 0.5,
+    K_v: float = 2.5,
+    gravity: float = 9.81,
+) -> Array:
+    """Compute augmented proportional navigation acceleration with minimum speed floor.
+
+    This implementation uses APN with lateral steering and axial speed floor:
+        a_lat = N * Vc * (omega x u_r) + (N * a_target_orthogonal / 2)
+        a_axial = max(0, K_v * (V_min - |vel_pursuer|)) * vel_pursuer_unit
+        a_cmd = a_lat + a_axial + gravity
+
+    The axial component only accelerates when speed drops below V_min (no upper bound).
+    Falls back to pure pursuit when velocity closure is below threshold.
+
+    Args:
+        pos_rb: Position of blue (target) relative to red (pursuer).
+                Shape: (..., 3), computed as (target_pos - pursuer_pos).
+        vel_rb: Velocity of blue relative to red.
+                Shape: (..., 3), computed as (target_vel - pursuer_vel).
+        vel_pursuer: Velocity of the pursuer in world frame.
+                     Shape: (..., 3).
+        N_gain: Navigation constant (typically 3-5).
+        V_min: Minimum speed threshold [m/s]. Only accelerates if below this.
+        K_v: Speed floor gain.
+        gravity: Gravity magnitude [m/s^2].
+
+    Returns:
+        Desired acceleration in world frame, shape (..., 3).
+        Includes gravity compensation in z-axis.
+    """
+    # 1. Standard 3D APN Math
+    dist = jnp.linalg.norm(pos_rb, axis=-1, keepdims=True) + 1e-6
+    u_r = pos_rb / dist  # LOS unit vector
+    omega = jnp.cross(pos_rb, vel_rb, axis=-1) / (dist ** 2)
+
+    # Lateral (Steering)
+    a_lat = N_gain * jnp.linalg.norm(vel_rb) * jnp.cross(omega, u_r, axis=-1)
+
+    # Axial (Speed Floor)
+    # Only accelerate if we drop below the minimum threshold (no upper bound)
+    pursuer_speed = jnp.linalg.norm(vel_pursuer, axis=-1, keepdims=True) + 1e-6
+    vel_pursuer_unit = vel_pursuer / pursuer_speed
+    a_axial_mag = jnp.maximum(0.0, K_v * (V_min - pursuer_speed))
+    a_axial = a_axial_mag * u_r
+
+    # 4. AugProNav acceleration with gravity compensation
+    accel_pronav = a_lat + a_axial
+    accel_pronav = accel_pronav.at[..., 2].add(gravity)
+
+    return accel_pronav
 
 def augmented_pronav(
     pos_rb: Array,

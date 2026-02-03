@@ -15,8 +15,11 @@ from gymnasium import spaces
 from jax.scipy.spatial.transform import Rotation as JaxRotation
 
 from crazyflow.sim import Sim
+from crazyflow.sim.data import SimData
 from crazyflow.sim.physics import Physics
 from crazyflow.control.control import Control
+from crazyflow.randomize import randomize_mass, randomize_inertia
+from crazyflow.utils import leaf_replace
 from drone_models.core import load_params
 
 from crazyflie_mape_crazyflow.envs.red_vs_blue_config import RedVsBlueEnvConfig
@@ -115,7 +118,7 @@ def _jit_check_collisions(
     alive_mask_bb = blue_alive[:, :, None] & blue_alive[:, None, :]
     bb_collision_matrix = (bb_dist < bb_tol) & alive_mask_bb
     bb_collision_matrix = bb_collision_matrix & ~jnp.eye(B, dtype=jnp.bool_)[None, :, :]
-    bb_crash = bb_collision_matrix.any(axis=-1)
+    bb_collision = bb_collision_matrix.any(axis=-1)
 
     # Red-red collisions (vectorized)
     red_pos_i = red_pos[:, :, None, :]
@@ -124,13 +127,13 @@ def _jit_check_collisions(
     alive_mask_rr = red_alive[:, :, None] & red_alive[:, None, :]
     rr_collision_matrix = (rr_dist < rr_tol) & alive_mask_rr
     rr_collision_matrix = rr_collision_matrix & ~jnp.eye(R, dtype=jnp.bool_)[None, :, :]
-    rr_crash = rr_collision_matrix.any(axis=-1)
+    rr_collision = rr_collision_matrix.any(axis=-1)
 
     # Blue-red collisions / captures (vectorized)
     br_dist = jnp.linalg.norm(blue_pos[:, :, None, :] - red_pos[:, None, :, :], axis=-1)
     alive_mask_br = blue_alive[:, :, None] & red_alive[:, None, :]
     br_collision_matrix = (br_dist < br_tol) & alive_mask_br
-    br_crash = br_collision_matrix.any(axis=-1)
+    rb_collision = br_collision_matrix.any(axis=-1)
 
     # Boundary violations (blue only)
     out_of_bounds = (
@@ -140,7 +143,7 @@ def _jit_check_collisions(
         (jnp.abs(blue_pos[:, :, 1]) > boundary)
     ) & blue_alive
 
-    return bb_crash, rr_crash, br_crash, out_of_bounds
+    return bb_collision, rr_collision, rb_collision, out_of_bounds
 
 
 @jax.jit
@@ -148,9 +151,9 @@ def _jit_update_alive_and_reassign(
     blue_alive: jnp.ndarray,
     red_alive: jnp.ndarray,
     red_target: jnp.ndarray,
-    bb_crash: jnp.ndarray,
-    rr_crash: jnp.ndarray,
-    br_crash: jnp.ndarray,
+    bb_collision: jnp.ndarray,
+    rr_collision: jnp.ndarray,
+    rb_collision: jnp.ndarray,
     out_of_bounds: jnp.ndarray,
     blue_pos: jnp.ndarray,
     red_pos: jnp.ndarray,
@@ -160,8 +163,8 @@ def _jit_update_alive_and_reassign(
     B = blue_pos.shape[1]
 
     # Mark dead agents
-    blue_dead = bb_crash | br_crash | out_of_bounds
-    red_dead = rr_crash
+    blue_dead = bb_collision | rb_collision | out_of_bounds
+    red_dead = rr_collision
 
     # Also mark red as dead if they captured a blue (vectorized)
     rb_dist = jnp.linalg.norm(red_pos[:, :, None, :] - blue_pos[:, None, :, :], axis=-1)
@@ -193,12 +196,16 @@ def _jit_update_alive_and_reassign(
 
 @jax.jit
 def _jit_compute_rewards(
-    bb_crash: jnp.ndarray,
-    rr_crash: jnp.ndarray,
-    br_crash: jnp.ndarray,
+    bb_collision: jnp.ndarray,
+    rr_collision: jnp.ndarray,
+    rb_collision: jnp.ndarray,
     out_of_bounds: jnp.ndarray,
     blue_alive: jnp.ndarray,
     red_pos: jnp.ndarray,
+    blue_rpy: jnp.ndarray,
+    blue_vel: jnp.ndarray,
+    blue_cmd: jnp.ndarray,
+    last_blue_cmd: jnp.ndarray,
     reward_blue_crash: float,
     reward_red_crash: float,
     reward_capture: float,
@@ -206,19 +213,70 @@ def _jit_compute_rewards(
     reward_alive: float,
     reward_pursuer_proximity: float,
     reward_pursuer_proximity_decay: float,
+    reward_angle_coef: float,
+    reward_velocity_coef: float,
+    reward_action_coef: float,
+    reward_action_smoothness_thrust: float,
+    reward_action_smoothness_rpy: float,
     n_pairs: int,
-) -> jnp.ndarray:
-    """JIT-compiled reward computation."""
-    reward_bb = (bb_crash.astype(jnp.float32) * blue_alive.astype(jnp.float32)).sum(axis=1) * reward_blue_crash / 2
-    reward_rr = rr_crash.astype(jnp.float32).sum(axis=1) * reward_red_crash / 2
-    reward_br = br_crash.astype(jnp.float32).sum(axis=1) * reward_capture
+) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
+    """JIT-compiled reward computation.
+
+    Returns:
+        Tuple of (total_reward, components) where components is a dict of individual
+        reward contributions (already normalized by n_pairs).
+    """
+    reward_bb = (bb_collision.astype(jnp.float32) * blue_alive.astype(jnp.float32)).sum(axis=1) * reward_blue_crash / 2
+    reward_rr = rr_collision.astype(jnp.float32).sum(axis=1) * reward_red_crash / 2
+    reward_br = rb_collision.astype(jnp.float32).sum(axis=1) * reward_capture
     reward_fence = (out_of_bounds.astype(jnp.float32) * blue_alive.astype(jnp.float32)).sum(axis=1) * reward_boundary
     reward_alive_total = blue_alive.astype(jnp.float32).sum(axis=1) * reward_alive
     pursuer_dist = jnp.linalg.norm(red_pos[:, 0] - red_pos[:, 1], axis=-1)
     reward_proximity = reward_pursuer_proximity * jnp.exp(-reward_pursuer_proximity_decay * pursuer_dist)
 
-    total_reward = (reward_bb + reward_rr + reward_br + reward_fence + reward_alive_total + reward_proximity) / n_pairs
-    return total_reward
+    # Angle penalty: penalizes orientation deviation from level flight
+    # Sum ||rpy|| across all blue agents, weighted by alive status
+    rpy_norm = jnp.linalg.norm(blue_rpy, axis=-1)  # (N, B)
+    angle_penalty = reward_angle_coef * (rpy_norm * blue_alive.astype(jnp.float32)).sum(axis=1)
+
+    # Velocity penalty: penalizes high speeds
+    # Sum ||vel||² across all blue agents, weighted by alive status
+    vel_sq = (blue_vel ** 2).sum(axis=-1)  # (N, B) - squared velocity magnitude
+    velocity_penalty = reward_velocity_coef * (vel_sq * blue_alive.astype(jnp.float32)).sum(axis=1)
+
+    # Action penalties
+    # Energy penalty: act_coef * thrust² (thrust is the 4th action component)
+    thrust = blue_cmd[..., 3]  # (N, B)
+    energy_penalty = reward_action_coef * (thrust ** 2 * blue_alive.astype(jnp.float32)).sum(axis=1)
+
+    # Action smoothness penalties
+    action_diff = blue_cmd - last_blue_cmd  # (N, B, 4)
+    # Thrust smoothness: d_act_th_coef * (Δthrust)²
+    thrust_diff = action_diff[..., 3]  # (N, B)
+    thrust_smoothness_penalty = reward_action_smoothness_thrust * (thrust_diff ** 2 * blue_alive.astype(jnp.float32)).sum(axis=1)
+    # RPY smoothness: d_act_xy_coef * Σ(Δroll² + Δpitch² + Δyaw²)
+    rpy_diff = action_diff[..., :3]  # (N, B, 3)
+    rpy_smoothness_penalty = reward_action_smoothness_rpy * ((rpy_diff ** 2).sum(axis=-1) * blue_alive.astype(jnp.float32)).sum(axis=1)
+
+    total_reward = (reward_bb + reward_rr + reward_br + reward_fence + reward_alive_total + reward_proximity
+                    - angle_penalty - velocity_penalty - energy_penalty - thrust_smoothness_penalty - rpy_smoothness_penalty) / n_pairs
+
+    # Return individual components (normalized by n_pairs to match total)
+    components = {
+        "bb_collision": reward_bb / n_pairs,
+        "rr_collision": reward_rr / n_pairs,
+        "rb_collision": reward_br / n_pairs,
+        "boundary": reward_fence / n_pairs,
+        "alive": reward_alive_total / n_pairs,
+        "proximity": reward_proximity / n_pairs,
+        "angle_penalty": -angle_penalty / n_pairs,
+        "velocity_penalty": -velocity_penalty / n_pairs,
+        "energy_penalty": -energy_penalty / n_pairs,
+        "thrust_smoothness": -thrust_smoothness_penalty / n_pairs,
+        "rpy_smoothness": -rpy_smoothness_penalty / n_pairs,
+    }
+
+    return total_reward, components
 
 
 @jax.jit
@@ -441,6 +499,47 @@ def _jit_augmented_pronav(
     return accel
 
 
+def _jit_tpn_with_axial(
+    pos_rb: jnp.ndarray,
+    vel_rb: jnp.ndarray,
+    vel_pursuer: jnp.ndarray,
+    N_gain: float = 3.0,
+    V_min: float = 0.5,
+    K_v: float = 2.5,
+    gravity: float = 9.81,
+) -> jnp.ndarray:
+    """JIT-friendly True Proportional Navigation with axial speed floor.
+
+    Uses TPN (||vel_rb|| instead of Vc for stability) with axial speed floor:
+        a_lat = N * ||vel_rb|| * (omega x u_r)
+        a_axial = max(0, K_v * (V_min - |vel_pursuer|)) * u_r
+
+    Unlike AugProNav:
+    - Does NOT fall back to pure pursuit (always uses TPN)
+    - Does NOT use target acceleration feedforward
+    - Uses ||vel_rb|| instead of Vc for more stable behavior
+    """
+    # 1. Standard 3D ProNav Math
+    dist = jnp.linalg.norm(pos_rb, axis=-1, keepdims=True) + 1e-6
+    u_r = pos_rb / dist  # LOS unit vector
+    omega = jnp.cross(pos_rb, vel_rb) / (dist ** 2)
+
+    # 2. Lateral (Steering) - uses ||vel_rb|| instead of Vc for TPN
+    vel_rb_norm = jnp.linalg.norm(vel_rb, axis=-1, keepdims=True)
+    a_lat = N_gain * vel_rb_norm * jnp.cross(omega, u_r)
+
+    # 3. Axial (Speed Floor) - only accelerate if below V_min
+    pursuer_speed = jnp.linalg.norm(vel_pursuer, axis=-1, keepdims=True) + 1e-6
+    a_axial_mag = jnp.maximum(0.0, K_v * (V_min - pursuer_speed))
+    a_axial = a_axial_mag * u_r
+
+    # 4. TPN acceleration with gravity compensation
+    accel = a_lat + a_axial
+    accel = accel.at[..., 2].add(gravity)
+
+    return accel
+
+
 @partial(jax.jit, static_argnames=["pursuer_strategy", "mass", "roll_pitch_max", "yaw_max", "min_thrust", "max_thrust",
                                    "pp_k_pxy", "pp_k_vxy", "pp_k_pz", "pp_k_vz", "N_pronav_fb", "N_pronav_ff",
                                    "velocity_closure_threshold", "gravity", "N_gain", "V_min", "K_v"])
@@ -488,6 +587,11 @@ def _jit_compute_red_control(
             pos_rb, vel_rb, red_vel, accel_target,
             N_gain, V_min, K_v, velocity_closure_threshold, gravity,
             pp_k_pxy, pp_k_vxy, pp_k_pz, pp_k_vz
+        )
+    elif pursuer_strategy == "TPN":
+        accel = _jit_tpn_with_axial(
+            pos_rb, vel_rb, red_vel,
+            N_gain, V_min, K_v, gravity
         )
     else:  # ProNav (default)
         accel_target = jnp.take_along_axis(prev_blue_accel, target_idx[:, :, None].astype(jnp.int32), axis=1)
@@ -586,6 +690,22 @@ class RedVsBlueEnv(gym.Env):
             device=self.cfg.device,
         )
 
+        # Override mass in drone params
+        params = self.sim.data.params
+        params = params.replace(mass=params.mass.at[:, :].set(self.cfg.mass))
+        self.sim.data = self.sim.data.replace(params=params)
+
+        # Apply domain randomization if configured
+        self._apply_domain_randomization()
+
+        # Store base pipeline (without disturbance) for dynamic enable/disable
+        self._base_step_pipeline = self.sim.step_pipeline
+        self._disturbance_enabled = False
+
+        # Inject disturbance function into simulation pipeline if enabled
+        if self.cfg.enable_disturbance:
+            self._enable_disturbance()
+
         # Calculate hover RPM from first_principles model parameters
         fp_params = load_params("first_principles", self.cfg.drone_model)
         rpm2thrust = fp_params["rpm2thrust"]  # [c0, c1, c2] where thrust = c0 + c1*rpm + c2*rpm^2
@@ -595,6 +715,80 @@ class RedVsBlueEnv(gym.Env):
         b = rpm2thrust[1]
         c = rpm2thrust[0] - thrust_per_motor_hover
         self.hover_rpm = float((-b + np.sqrt(b**2 - 4*a*c)) / (2*a))
+
+    def _apply_domain_randomization(self, mask: jnp.ndarray | None = None):
+        """Apply domain randomization to mass and/or inertia.
+
+        Args:
+            mask: Boolean array of shape (n_worlds,) indicating which worlds to randomize.
+                  If None, all worlds are randomized.
+        """
+        if not self.cfg.randomize_mass and not self.cfg.randomize_inertia:
+            return
+
+        if self.cfg.randomize_mass:
+            key = jax.random.key(np.random.randint(0, 2**31))
+            mass_noise = jax.random.normal(
+                key, (self.cfg.n_worlds, self.cfg.n_drones, 1)
+            ) * self.cfg.mass_randomization_std
+            randomized_masses = self.cfg.mass + mass_noise
+            randomize_mass(self.sim, randomized_masses, mask)
+
+        if self.cfg.randomize_inertia:
+            key = jax.random.key(np.random.randint(0, 2**31))
+            J_noise = jax.random.normal(
+                key, (self.cfg.n_worlds, self.cfg.n_drones, 3, 3)
+            ) * self.cfg.inertia_randomization_std
+            J_randomized = self.sim.data.params.J + J_noise
+            randomize_inertia(self.sim, J_randomized, mask)
+
+    def _create_disturbance_fn(self):
+        """Create a disturbance function for the simulation pipeline.
+
+        Returns:
+            A function that applies random force and torque disturbances to the simulation.
+        """
+        force_std = self.cfg.disturbance_force_std
+        torque_std = self.cfg.disturbance_torque_std
+
+        def disturbance_fn(data: SimData) -> SimData:
+            key = data.core.rng_key
+            key, force_key, torque_key = jax.random.split(key, 3)
+
+            states = data.states
+            disturbance_force = jax.random.normal(force_key, states.force.shape) * force_std
+            disturbance_torque = jax.random.normal(torque_key, states.torque.shape) * torque_std
+
+            states = states.replace(
+                force=disturbance_force,
+                torque=disturbance_torque,
+            )
+            core = data.core.replace(rng_key=key)
+            return data.replace(states=states, core=core)
+
+        return disturbance_fn
+
+    def _enable_disturbance(self):
+        """Enable disturbance injection in simulation pipeline."""
+        if self._disturbance_enabled:
+            # Already enabled, just update the function with new std values
+            self._disable_disturbance()
+
+        disturbance_fn = self._create_disturbance_fn()
+        self.sim.step_pipeline = (
+            self._base_step_pipeline[:2] + (disturbance_fn,) + self._base_step_pipeline[2:]
+        )
+        self.sim.build_step_fn()
+        self._disturbance_enabled = True
+
+    def _disable_disturbance(self):
+        """Disable disturbance injection in simulation pipeline."""
+        if not self._disturbance_enabled:
+            return
+
+        self.sim.step_pipeline = self._base_step_pipeline
+        self.sim.build_step_fn()
+        self._disturbance_enabled = False
 
     def _define_spaces(self):
         """Define observation and action spaces."""
@@ -682,6 +876,9 @@ class RedVsBlueEnv(gym.Env):
         # Pending blue commands
         self.blue_cmd = jnp.zeros((N, B, 4))
 
+        # Previous blue commands (for action smoothness penalty)
+        self.last_blue_cmd = jnp.zeros((N, B, 4))
+
         # Previous blue velocity and acceleration (for ProNav feedforward)
         self.prev_blue_vel = jnp.zeros((N, B, 3))
         self.prev_blue_accel = jnp.zeros((N, B, 3))
@@ -713,17 +910,20 @@ class RedVsBlueEnv(gym.Env):
         # Reset simulator
         self.sim.reset()
 
+        # Apply domain randomization (samples new mass/inertia each episode)
+        self._apply_domain_randomization()
+
         # Reset episode counters (per-world)
         self.episode_steps = np.zeros(self.cfg.n_worlds, dtype=np.int32)
 
         # Reset termination event tracking (rates, normalized by n_worlds)
         self.last_termination_events = {
-            "bb_crash": 0.0,
-            "rr_crash": 0.0,
-            "br_crash": 0.0,
+            "bb_collision": 0.0,
+            "rr_collision": 0.0,
+            "rb_collision": 0.0,
             "out_of_bounds": 0.0,
-            "all_blue_dead": 0.0,
-            "all_red_dead": 0.0,
+            "red_win": 0.0,
+            "blue_win": 0.0,
             "max_steps": 0.0,
         }
 
@@ -734,6 +934,9 @@ class RedVsBlueEnv(gym.Env):
         # Reset blue velocity/acceleration tracking (for ProNav feedforward)
         self.prev_blue_vel = jnp.zeros((self.cfg.n_worlds, self.cfg.n_blue, 3))
         self.prev_blue_accel = jnp.zeros((self.cfg.n_worlds, self.cfg.n_blue, 3))
+
+        # Reset last blue commands (for action smoothness penalty)
+        self.last_blue_cmd = jnp.zeros((self.cfg.n_worlds, self.cfg.n_blue, 4))
 
         # Reset target assignments
         N, B, R = self.cfg.n_worlds, self.cfg.n_blue, self.cfg.n_red
@@ -826,6 +1029,9 @@ class RedVsBlueEnv(gym.Env):
         self.prev_blue_vel = jnp.where(mask_jnp[:, None, None], 0.0, self.prev_blue_vel)
         self.prev_blue_accel = jnp.where(mask_jnp[:, None, None], 0.0, self.prev_blue_accel)
 
+        # Reset last blue commands (for action smoothness penalty)
+        self.last_blue_cmd = jnp.where(mask_jnp[:, None, None], 0.0, self.last_blue_cmd)
+
         # Respawn agents in done worlds using spawn function
         key = self.sim.data.core.rng_key
         key, spawn_key, target_key = jax.random.split(key, 3)
@@ -849,32 +1055,26 @@ class RedVsBlueEnv(gym.Env):
             core=self.sim.data.core.replace(rng_key=key)
         )
 
+        # Reset simulator state for done worlds (velocities, quaternions, etc.)
+        self.sim.reset(mask=mask_jnp)
+
         # Always spawn for all N worlds to avoid JIT recompilation
         all_blue_pos, all_red_pos = self._spawn_fn(spawn_key, N, B, R)
-
-        # Vectorized position reset using where
         new_pos = jnp.concatenate([all_blue_pos, all_red_pos], axis=1)  # (N, B+R, 3)
-        states = self.sim.data.states
-        pos = jnp.where(mask_jnp[:, None, None], new_pos, states.pos)
 
-        # Reset velocities, quaternion, rotor velocities using where
-        zeros_vel = jnp.zeros_like(states.vel)
-        vel = jnp.where(mask_jnp[:, None, None], zeros_vel, states.vel)
-        ang_vel = jnp.where(mask_jnp[:, None, None], zeros_vel, states.ang_vel)
-
-        identity_quat = jnp.broadcast_to(
-            jnp.array([0.0, 0.0, 0.0, 1.0]), states.quat.shape
-        )
-        quat = jnp.where(mask_jnp[:, None, None], identity_quat, states.quat)
-
+        # Set rotor velocities to hover RPM
         hover_rpm = jnp.broadcast_to(
-            jnp.array(self.hover_rpm), states.rotor_vel.shape
+            jnp.array(self.hover_rpm), self.sim.data.states.rotor_vel.shape
         )
-        rotor_vel = jnp.where(mask_jnp[:, None, None], hover_rpm, states.rotor_vel)
 
-        # Update sim state (single replace)
-        states = states.replace(pos=pos, vel=vel, quat=quat, ang_vel=ang_vel, rotor_vel=rotor_vel)
+        # Update sim state with spawn positions and hover RPM using leaf_replace
+        states = leaf_replace(
+            self.sim.data.states, mask=mask_jnp, pos=new_pos, rotor_vel=hover_rpm
+        )
         self.sim.data = self.sim.data.replace(states=states)
+
+        # Apply domain randomization to reset worlds
+        self._apply_domain_randomization(mask=mask_jnp)
 
     def step(
         self,
@@ -889,6 +1089,9 @@ class RedVsBlueEnv(gym.Env):
         Returns:
             observations, rewards, terminated, truncated, info
         """
+        # Save current blue cmd before updating (for action smoothness penalty)
+        self.last_blue_cmd = self.blue_cmd
+
         # Process blue agent actions
         self._process_blue_actions(actions)
 
@@ -902,27 +1105,35 @@ class RedVsBlueEnv(gym.Env):
         self.sim.step(n_steps=self.cfg.sim_steps_per_control)
 
         # Check collisions and update alive status
-        bb_crash, rr_crash, br_crash, out_of_bounds = self._check_collisions()
-        self._update_alive_status(bb_crash, rr_crash, br_crash, out_of_bounds)
+        bb_collision, rr_collision, rb_collision, out_of_bounds = self._check_collisions()
+
+        # Save blue_alive BEFORE updating for reward computation
+        # (agents that just died should still receive their death penalty)
+        pre_collision_blue_alive = self.blue_alive
+
+        self._update_alive_status(bb_collision, rr_collision, rb_collision, out_of_bounds)
 
         # Batch termination event counts into single JAX sync
         n_worlds = self.cfg.n_worlds
         term_counts = jnp.stack([
-            bb_crash.any(axis=1).sum(),
-            rr_crash.any(axis=1).sum(),
-            br_crash.any(axis=1).sum(),
+            bb_collision.any(axis=1).sum(),
+            rr_collision.any(axis=1).sum(),
+            rb_collision.any(axis=1).sum(),
             out_of_bounds.any(axis=1).sum(),
         ])
         term_counts_np = np.asarray(term_counts)
         self.last_termination_events = {
-            "bb_crash": float(term_counts_np[0]) / n_worlds,
-            "rr_crash": float(term_counts_np[1]) / n_worlds,
-            "br_crash": float(term_counts_np[2]) / n_worlds,
+            "bb_collision": float(term_counts_np[0]) / n_worlds,
+            "rr_collision": float(term_counts_np[1]) / n_worlds,
+            "rb_collision": float(term_counts_np[2]) / n_worlds,
             "out_of_bounds": float(term_counts_np[3]) / n_worlds,
         }
 
-        # Compute rewards
-        rewards = self._compute_rewards(bb_crash, rr_crash, br_crash, out_of_bounds)
+        # Compute rewards using pre-collision alive status
+        # (so agents that just died receive their death penalty)
+        rewards = self._compute_rewards(
+            bb_collision, rr_collision, rb_collision, out_of_bounds, pre_collision_blue_alive
+        )
 
         # Update episode steps (per-world)
         self.episode_steps += 1
@@ -930,32 +1141,48 @@ class RedVsBlueEnv(gym.Env):
         # Check termination and truncation (compute alive once, reuse)
         all_blue_dead = ~self.blue_alive.any(axis=1)
         all_red_dead = ~self.red_alive.any(axis=1)
-        terminated_np = np.asarray(all_blue_dead | all_red_dead)
-        terminated = {agent: terminated_np for agent in self.possible_agents}
+        episode_terminated = np.asarray(all_blue_dead | all_red_dead)
+
+        # Per-agent termination: agent is terminated if dead OR episode ended
+        # This is important for correct GAE computation in SKRL - dead agents
+        # should have terminated=True so value bootstrap is 0
+        blue_alive_np = np.asarray(self.blue_alive)
+        terminated = {}
+        for i, agent in enumerate(self.possible_agents):
+            agent_dead = ~blue_alive_np[:, i]
+            terminated[agent] = agent_dead | episode_terminated
+
         truncated = self._check_truncated()
 
         # Add termination/truncation rates (reuse already-computed arrays)
         sample_agent = self.possible_agents[0]
         all_blue_dead_np = np.asarray(all_blue_dead)
         all_red_dead_np = np.asarray(all_red_dead)
-        self.last_termination_events["all_blue_dead"] = float(all_blue_dead_np.sum()) / n_worlds
-        self.last_termination_events["all_red_dead"] = float(all_red_dead_np.sum()) / n_worlds
-        self.last_termination_events["max_steps"] = float(truncated[sample_agent].sum()) / n_worlds
+        # Red wins: all blues dead (includes draws where both teams die)
+        self.last_termination_events["red_win"] = float(all_blue_dead_np.sum()) / n_worlds
+        # Blue wins: all reds dead AND at least one blue survives (excludes mutual destruction)
+        blue_win = all_red_dead_np & ~all_blue_dead_np
+        self.last_termination_events["blue_win"] = float(blue_win.sum()) / n_worlds
+        # Only count max_steps for worlds that truncated but did NOT terminate
+        # (avoids double counting if termination happens at max_steps)
+        truncated_only = truncated[sample_agent] & ~episode_terminated
+        self.last_termination_events["max_steps"] = float(truncated_only.sum()) / n_worlds
 
         # Save alive status BEFORE auto-reset for info dict
         pre_reset_blue_alive = np.array(self.blue_alive)
         pre_reset_red_alive = np.array(self.red_alive)
 
-        # Auto-reset worlds that are done (terminated or truncated)
-        done_mask = terminated[sample_agent] | truncated[sample_agent]
+        # Auto-reset worlds that are done (episode terminated or truncated)
+        # Use episode_terminated (not per-agent terminated) for reset decision
+        done_mask = episode_terminated | truncated[sample_agent]
         if done_mask.any():
             self._reset_done_worlds(done_mask)
 
         # Get observations (after auto-reset so we return initial obs for reset worlds)
         obs = self._get_observations()
         info = self._get_info(
-            bb_crash, rr_crash, br_crash, out_of_bounds, rewards,
-            pre_reset_blue_alive, pre_reset_red_alive
+            bb_collision, rr_collision, rb_collision, out_of_bounds, rewards,
+            pre_reset_blue_alive, pre_reset_red_alive, episode_terminated
         )
 
         return obs, rewards, terminated, truncated, info
@@ -1077,9 +1304,9 @@ class RedVsBlueEnv(gym.Env):
         """Check for collisions and boundary violations (JIT-compiled).
 
         Returns:
-            bb_crash: Blue-blue collisions, shape (N, B).
-            rr_crash: Red-red collisions, shape (N, R).
-            br_crash: Blue-red captures, shape (N, B).
+            bb_collision: Blue-blue collisions, shape (N, B).
+            rr_collision: Red-red collisions, shape (N, R).
+            rb_collision: Blue-red captures, shape (N, B).
             out_of_bounds: Blue boundary violations, shape (N, B).
         """
         B = self.cfg.n_blue
@@ -1091,9 +1318,9 @@ class RedVsBlueEnv(gym.Env):
         return _jit_check_collisions(
             blue_pos, red_pos,
             self.blue_alive, self.red_alive,
-            self.cfg.bb_crash_tolerance,
-            self.cfg.rr_crash_tolerance,
-            self.cfg.br_crash_tolerance,
+            self.cfg.bb_collision_tolerance,
+            self.cfg.rr_collision_tolerance,
+            self.cfg.rb_collision_tolerance,
             self.cfg.min_altitude,
             self.cfg.max_altitude,
             self.cfg.boundary_size,
@@ -1101,9 +1328,9 @@ class RedVsBlueEnv(gym.Env):
 
     def _update_alive_status(
         self,
-        bb_crash: jnp.ndarray,
-        rr_crash: jnp.ndarray,
-        br_crash: jnp.ndarray,
+        bb_collision: jnp.ndarray,
+        rr_collision: jnp.ndarray,
+        rb_collision: jnp.ndarray,
         out_of_bounds: jnp.ndarray,
     ):
         """Update alive status based on collisions (JIT-compiled)."""
@@ -1116,29 +1343,45 @@ class RedVsBlueEnv(gym.Env):
         self.blue_alive, self.red_alive, self.red_target, self.red_target_one_hot = (
             _jit_update_alive_and_reassign(
                 self.blue_alive, self.red_alive, self.red_target,
-                bb_crash, rr_crash, br_crash, out_of_bounds,
+                bb_collision, rr_collision, rb_collision, out_of_bounds,
                 blue_pos, red_pos,
-                self.cfg.br_crash_tolerance,
+                self.cfg.rb_collision_tolerance,
             )
         )
 
     def _compute_rewards(
         self,
-        bb_crash: jnp.ndarray,
-        rr_crash: jnp.ndarray,
-        br_crash: jnp.ndarray,
+        bb_collision: jnp.ndarray,
+        rr_collision: jnp.ndarray,
+        rb_collision: jnp.ndarray,
         out_of_bounds: jnp.ndarray,
+        blue_alive: jnp.ndarray,
     ) -> dict[str, np.ndarray]:
         """Compute rewards for each agent (JIT-compiled).
 
         Uses team reward - all blue agents get the same reward.
+        Also stores individual reward components in self.last_reward_components
+        for logging purposes.
+
+        Args:
+            blue_alive: Pre-collision alive status to use for reward computation.
+                       Agents that just died should still receive their death penalty.
         """
         B = self.cfg.n_blue
-        red_pos = self.sim.data.states.pos[:, B:]
+        states = self.sim.data.states
+        red_pos = states.pos[:, B:]
 
-        total_reward = _jit_compute_rewards(
-            bb_crash, rr_crash, br_crash, out_of_bounds,
-            self.blue_alive, red_pos,
+        # Compute blue RPY for angle penalty
+        blue_quat = states.quat[:, :B]
+        blue_rpy = self._quat_to_rpy(blue_quat)
+
+        # Get blue velocity for velocity penalty
+        blue_vel = states.vel[:, :B]
+
+        total_reward, components = _jit_compute_rewards(
+            bb_collision, rr_collision, rb_collision, out_of_bounds,
+            blue_alive, red_pos,
+            blue_rpy, blue_vel, self.blue_cmd, self.last_blue_cmd,
             self.cfg.reward_blue_crash,
             self.cfg.reward_red_crash,
             self.cfg.reward_capture,
@@ -1146,8 +1389,18 @@ class RedVsBlueEnv(gym.Env):
             self.cfg.reward_alive,
             self.cfg.reward_pursuer_proximity,
             self.cfg.reward_pursuer_proximity_decay,
+            self.cfg.reward_angle_coef,
+            self.cfg.reward_velocity_coef,
+            self.cfg.reward_action_coef,
+            self.cfg.reward_action_smoothness_thrust,
+            self.cfg.reward_action_smoothness_rpy,
             self.n_pairs,
         )
+
+        # Store individual reward components per world (for episode return tracking)
+        self.last_reward_components = {
+            key: np.array(val) for key, val in components.items()
+        }
 
         total_reward_np = np.array(total_reward)
         return {agent: total_reward_np for agent in self.possible_agents}
@@ -1271,13 +1524,14 @@ class RedVsBlueEnv(gym.Env):
 
     def _get_info(
         self,
-        bb_crash: jnp.ndarray | None = None,
-        rr_crash: jnp.ndarray | None = None,
-        br_crash: jnp.ndarray | None = None,
+        bb_collision: jnp.ndarray | None = None,
+        rr_collision: jnp.ndarray | None = None,
+        rb_collision: jnp.ndarray | None = None,
         out_of_bounds: jnp.ndarray | None = None,
         rewards: dict[str, np.ndarray] | None = None,
         pre_reset_blue_alive: np.ndarray | None = None,
         pre_reset_red_alive: np.ndarray | None = None,
+        episode_terminated: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Get info dict.
 
@@ -1285,13 +1539,14 @@ class RedVsBlueEnv(gym.Env):
         SKRL's trainer calls env.state() separately after each step.
 
         Args:
-            bb_crash: Blue-blue collisions this step, shape (N, B).
-            rr_crash: Red-red collisions this step, shape (N, R).
-            br_crash: Blue-red captures this step, shape (N, B).
+            bb_collision: Blue-blue collisions this step, shape (N, B).
+            rr_collision: Red-red collisions this step, shape (N, R).
+            rb_collision: Blue-red captures this step, shape (N, B).
             out_of_bounds: Boundary violations this step, shape (N, B).
             rewards: Reward dict per agent, each shape (N,).
             pre_reset_blue_alive: Blue alive status before auto-reset, shape (N, B).
             pre_reset_red_alive: Red alive status before auto-reset, shape (N, R).
+            episode_terminated: Episode-level termination (all blue or all red dead), shape (N,).
 
         Returns:
             Info dictionary with alive status and termination events.
@@ -1303,14 +1558,16 @@ class RedVsBlueEnv(gym.Env):
         info = {
             "blue_alive": blue_alive,
             "red_alive": red_alive,
+            # Episode-level termination for eval scripts (distinct from per-agent terminated)
+            "episode_terminated": episode_terminated if episode_terminated is not None else np.zeros(self.cfg.n_worlds, dtype=bool),
         }
 
         # Add termination event rates if provided (normalized by n_worlds)
-        if bb_crash is not None:
+        if bb_collision is not None:
             n_worlds = self.cfg.n_worlds
-            info["termination/bb_crash"] = float(bb_crash.any(axis=1).sum()) / n_worlds
-            info["termination/rr_crash"] = float(rr_crash.any(axis=1).sum()) / n_worlds
-            info["termination/br_crash"] = float(br_crash.any(axis=1).sum()) / n_worlds
+            info["termination/bb_collision"] = float(bb_collision.any(axis=1).sum()) / n_worlds
+            info["termination/rr_collision"] = float(rr_collision.any(axis=1).sum()) / n_worlds
+            info["termination/rb_collision"] = float(rb_collision.any(axis=1).sum()) / n_worlds
             info["termination/out_of_bounds"] = float(out_of_bounds.any(axis=1).sum()) / n_worlds
 
         # Add mean reward (normalized across worlds)
@@ -1442,7 +1699,7 @@ class RedVsBlueEnv(gym.Env):
         Args:
             spawn_fn: New spawn function for agent positioning (optional).
             **params: Any parameters from RedVsBlueEnvConfig to update.
-                Examples: br_crash_tolerance, bb_crash_tolerance, boundary_size,
+                Examples: rb_collision_tolerance, bb_collision_tolerance, boundary_size,
                 reward_capture, N_pronav_fb, etc.
 
         Raises:
@@ -1452,6 +1709,10 @@ class RedVsBlueEnv(gym.Env):
         if spawn_fn is not None:
             self._spawn_fn = spawn_fn
 
+        # Track if disturbance settings changed
+        disturbance_changed = False
+        old_enable_disturbance = self.cfg.enable_disturbance
+
         # Update any config parameters
         for param_name, param_value in params.items():
             if not hasattr(self.cfg, param_name):
@@ -1460,3 +1721,16 @@ class RedVsBlueEnv(gym.Env):
                     f"Must be a valid RedVsBlueEnvConfig field."
                 )
             setattr(self.cfg, param_name, param_value)
+
+            # Track disturbance-related changes
+            if param_name in ("enable_disturbance", "disturbance_force_std", "disturbance_torque_std"):
+                disturbance_changed = True
+
+        # Handle disturbance enable/disable or std changes
+        if disturbance_changed:
+            if self.cfg.enable_disturbance:
+                # Enable or update disturbance (recreates function with new std values)
+                self._enable_disturbance()
+            elif old_enable_disturbance and not self.cfg.enable_disturbance:
+                # Disable disturbance
+                self._disable_disturbance()
