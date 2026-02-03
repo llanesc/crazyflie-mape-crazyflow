@@ -13,9 +13,38 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from crazyflie_interfaces.msg import AttitudeSetpoint
-from multiagent_pursuit_evasion_interfaces.msg import Status, State
+from multiagent_pursuit_evasion_interfaces.msg import Status, EvaderState, PursuerState
 from scipy.spatial.transform import Rotation
 from drone_models.core import load_params
+
+
+def quat_to_euler(x: float, y: float, z: float, w: float) -> tuple:
+    """Convert quaternion to euler (roll, pitch, yaw).
+
+    Args:
+        x, y, z, w: Quaternion components.
+
+    Returns:
+        Tuple of (roll, pitch, yaw) in radians.
+    """
+    # Roll (x-axis rotation)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+
+    # Pitch (y-axis rotation)
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1:
+        pitch = np.copysign(np.pi / 2, sinp)
+    else:
+        pitch = np.arcsin(sinp)
+
+    # Yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+
+    return roll, pitch, yaw
 
 
 class TeamBase(Node):
@@ -40,14 +69,14 @@ class TeamBase(Node):
         drone_model = config.get('drone_model', 'cf2x_T350')
         drone_params = load_params("so_rpy", drone_model)
 
-        self.mass = float(drone_params["mass"])
+        self.mass = float(drone_params["mass"]) + 4.9 / 1000.0
         self.gravity = float(np.abs(drone_params["gravity_vec"][2]))
-        self.min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
-        self.max_thrust = float(drone_params["thrust_max"]) * 4
+        self.min_thrust = self.mass * self.gravity * 0.5
+        self.max_thrust = self.mass * self.gravity * 1.5
 
         self.blue_initial_height = [1.0, 1.0]
         # self.red_initial_height = [0.67, 0.80]
-        self.red_initial_height = [0.91, 0.98]
+        self.red_initial_height = [1.19, 1.04]
 
         # Attitude limits
         self.roll_pitch_max = config.get('roll_pitch_max', 0.5)  # rad
@@ -118,35 +147,53 @@ class TeamBase(Node):
         return int(np.clip(pwm, 0, self.pwm_max))
 
     def states_to_np(self, states: list) -> np.ndarray:
-        """Convert State list to numpy array (10D).
+        """Convert PursuerState list to numpy array (10D).
+
+        Converts quaternion attitude to euler angles for control.
 
         Returns:
             Array of shape (n_agents, 10): [pos(3), vel(3), rpy(3), active(1)]
         """
         np_states = np.zeros((len(states), 10))
         for idx, state in enumerate(states):
+            # Convert quaternion to euler
+            rpy = quat_to_euler(
+                state.attitude[0],
+                state.attitude[1],
+                state.attitude[2],
+                state.attitude[3]
+            )
             np_states[idx, :] = np.array([
                 *state.position,
                 *state.velocity,
-                *state.attitude,
+                *rpy,
                 float(state.active)
             ])
         return np_states
 
     def states_to_np_extended(self, states: list) -> np.ndarray:
-        """Convert State list to numpy array with angular velocity (13D).
+        """Convert EvaderState list to numpy array with angular velocity (13D).
+
+        Converts quaternion attitude to euler angles for control.
 
         Returns:
             Array of shape (n_agents, 13): [pos(3), vel(3), rpy(3), ang_vel(3), active(1)]
         """
         np_states = np.zeros((len(states), 13))
         for idx, state in enumerate(states):
+            # Convert quaternion to euler
+            rpy = quat_to_euler(
+                state.attitude[0],
+                state.attitude[1],
+                state.attitude[2],
+                state.attitude[3]
+            )
             np_states[idx, :] = np.array([
-                *state.position,      # 0:3
-                *state.velocity,      # 3:6
-                *state.attitude,      # 6:9
+                *state.position,          # 0:3
+                *state.velocity,          # 3:6
+                *rpy,                     # 6:9
                 *state.angular_velocity,  # 9:12
-                float(state.active)   # 12
+                float(state.active)       # 12
             ])
         return np_states
 

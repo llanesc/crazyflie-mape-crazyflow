@@ -1,9 +1,9 @@
 {
   "policy_type": "ffn",
-  "experiment_name": "curriculum_training",
+  "experiment_name": "bounded_thrust",
   "n_pairs": 2,
   "drone_model": "cf2x_T350",
-  "pursuer_strategy": "ProNav",
+  "pursuer_strategy": "AugProNav",
   "roll_pitch_max": 0.5,
   "yaw_max": 0.1,
   "policy_net_sizes": [
@@ -19,9 +19,9 @@
   "control_freq": 100,
   "mellinger_freq": 500,
   "sim_freq": 500,
-  "bb_crash_tolerance": 0.2,
-  "rr_crash_tolerance": 0.2,
-  "br_crash_tolerance": 0.2,
+  "bb_collision_tolerance": 0.2,
+  "rr_collision_tolerance": 0.2,
+  "rb_collision_tolerance": 0.2,
   "boundary_size": 3.0,
   "min_altitude": 0.1,
   "max_altitude": 2.0,
@@ -71,9 +71,9 @@
     {
       "name": "Level 0",
       "params": {
-        "bb_crash_tolerance": 0.5,
-        "rr_crash_tolerance": 0.5,
-        "br_crash_tolerance": 0.5
+        "bb_collision_tolerance": 0.5,
+        "rr_collision_tolerance": 0.5,
+        "rb_collision_tolerance": 0.5
       },
       "spawn": {
         "blue": {
@@ -97,9 +97,9 @@
     {
       "name": "Level 1",
       "params": {
-        "bb_crash_tolerance": 0.4,
-        "rr_crash_tolerance": 0.4,
-        "br_crash_tolerance": 0.4
+        "bb_collision_tolerance": 0.4,
+        "rr_collision_tolerance": 0.4,
+        "rb_collision_tolerance": 0.4
       },
       "spawn": {
         "blue": {
@@ -123,9 +123,9 @@
     {
       "name": "Level 2",
       "params": {
-        "bb_crash_tolerance": 0.35,
-        "rr_crash_tolerance": 0.35,
-        "br_crash_tolerance": 0.35
+        "bb_collision_tolerance": 0.35,
+        "rr_collision_tolerance": 0.35,
+        "rb_collision_tolerance": 0.35
       },
       "spawn": {
         "blue": {
@@ -149,9 +149,9 @@
     {
       "name": "Level 3",
       "params": {
-        "bb_crash_tolerance": 0.3,
-        "rr_crash_tolerance": 0.3,
-        "br_crash_tolerance": 0.3
+        "bb_collision_tolerance": 0.3,
+        "rr_collision_tolerance": 0.3,
+        "rb_collision_tolerance": 0.3
       },
       "spawn": {
         "blue": {
@@ -175,9 +175,9 @@
     {
       "name": "Level 4",
       "params": {
-        "bb_crash_tolerance": 0.2,
-        "rr_crash_tolerance": 0.2,
-        "br_crash_tolerance": 0.2
+        "bb_collision_tolerance": 0.2,
+        "rr_collision_tolerance": 0.2,
+        "rb_collision_tolerance": 0.2
       },
       "spawn": {
         "blue": {

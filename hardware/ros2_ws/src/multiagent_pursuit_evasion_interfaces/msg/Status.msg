@@ -11,5 +11,5 @@ string[] evader_cf_names
 string[] pursuer_cf_names
 uint8[] pursuer_targets
 
-multiagent_pursuit_evasion_interfaces/State[] cf_evader_states
-multiagent_pursuit_evasion_interfaces/State[] cf_pursuer_states
+multiagent_pursuit_evasion_interfaces/EvaderState[] cf_evader_states
+multiagent_pursuit_evasion_interfaces/PursuerState[] cf_pursuer_states

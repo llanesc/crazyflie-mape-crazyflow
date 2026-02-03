@@ -22,7 +22,8 @@ if(BUILD_TESTING)
 endif()
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/State.msg"
+  "msg/EvaderState.msg"
+  "msg/PursuerState.msg"
   "msg/Status.msg"
   "srv/Command.srv"
   # DEPENDENCIES geometry_msgs # Add packages that above messages depend on, in this case geometry_msgs for Sphere.msg

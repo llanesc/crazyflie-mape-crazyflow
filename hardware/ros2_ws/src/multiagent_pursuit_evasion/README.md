@@ -182,9 +182,9 @@ The `environment_config.json` contains:
   "pursuer_strategy": "ProNav",
   "roll_pitch_max": 0.5,
   "yaw_max": 0.1,
-  "bb_crash_tolerance": 0.5,
-  "rr_crash_tolerance": 0.5,
-  "br_crash_tolerance": 0.5,
+  "bb_collision_tolerance": 0.5,
+  "rr_collision_tolerance": 0.5,
+  "rb_collision_tolerance": 0.5,
   "boundary_size": 3.0,
   "min_altitude": 0.1,
   "max_altitude": 2.0,
@@ -231,9 +231,9 @@ ros2 service call /command multiagent_pursuit_evasion_interfaces/srv/Command "{c
 ## Collision and Boundary Rules
 
 Matching the simulation environment:
-- **BB collision**: Both blue agents die if within `bb_crash_tolerance`
-- **RR collision**: Both red agents die if within `rr_crash_tolerance`
-- **BR capture**: Blue dies, capturing red also dies if within `br_crash_tolerance`
+- **BB collision**: Both blue agents die if within `bb_collision_tolerance`
+- **RR collision**: Both red agents die if within `rr_collision_tolerance`
+- **BR capture**: Blue dies, capturing red also dies if within `rb_collision_tolerance`
 - **Boundary**: Blue dies if outside `[-boundary_size, boundary_size]` in x/y or outside `[min_altitude, max_altitude]` in z
 
 When a blue dies, any red pursuing it is reassigned to the closest remaining alive blue.

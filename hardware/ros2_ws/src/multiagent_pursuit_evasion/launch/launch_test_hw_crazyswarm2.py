@@ -14,8 +14,13 @@ def generate_launch_description():
     crazyflies_yaml_path = os.path.join(
         get_package_share_directory(package_name),
         'config',
-        'crazyflies_sim.yaml')
+        'crazyflies_hw.yaml')
 
+    motion_capture_yaml_path = os.path.join(
+        get_package_share_directory(package_name),
+        'config',
+        'motion_capture.yaml')
+    
     return LaunchDescription(
         [
             IncludeLaunchDescription(
@@ -29,22 +34,13 @@ def generate_launch_description():
                 ),
                 launch_arguments={
                     'crazyflies_yaml_file': crazyflies_yaml_path,
+                    'motion_capture_yaml_file': motion_capture_yaml_path,
                     'gui': 'False',
                     'rviz': 'True',
                     'mocap': 'False',
                     'teleop': 'False',
                     'backend': 'cpp',
                 }.items(),
-            ),
-            Node(
-                package='multiagent_pursuit_evasion',
-                executable='main_executor',
-                name='mape_executor',
-                output='screen',
-                arguments=['-p', 'acmpc'],
-                additional_env={
-                    'SCIPY_ARRAY_API': '1',
-                },
             ),
         ]
     )

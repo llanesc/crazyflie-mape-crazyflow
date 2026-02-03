@@ -15,7 +15,7 @@ def generate_launch_description():
         get_package_share_directory(package_name),
         'config',
         'crazyflies_sim.yaml')
-
+    
     return LaunchDescription(
         [
             IncludeLaunchDescription(

@@ -78,7 +78,7 @@ void DroneStatusWidget::setName(const QString & name)
   name_label_->setText(name);
 }
 
-void DroneStatusWidget::setState(const multiagent_pursuit_evasion_interfaces::msg::State & state)
+void DroneStatusWidget::setState(const multiagent_pursuit_evasion_interfaces::msg::EvaderState & state)
 {
   // Position (meters)
   pos_label_->setText(QString("Pos:   %1 %2 %3 [m]")
@@ -92,17 +92,43 @@ void DroneStatusWidget::setState(const multiagent_pursuit_evasion_interfaces::ms
     .arg(state.velocity[1], 7, 'f', 3)
     .arg(state.velocity[2], 7, 'f', 3));
 
-  // Attitude (radians)
-  att_label_->setText(QString("RPY:   %1 %2 %3 [rad]")
-    .arg(state.attitude[0], 7, 'f', 3)
-    .arg(state.attitude[1], 7, 'f', 3)
-    .arg(state.attitude[2], 7, 'f', 3));
+  // Attitude (quaternion displayed as first 3 components)
+  att_label_->setText(QString("Quat:  %1 %2 %3 %4")
+    .arg(state.attitude[0], 6, 'f', 3)
+    .arg(state.attitude[1], 6, 'f', 3)
+    .arg(state.attitude[2], 6, 'f', 3)
+    .arg(state.attitude[3], 6, 'f', 3));
 
   // Angular velocity (rad/s)
   ang_vel_label_->setText(QString("Rates: %1 %2 %3 [rad/s]")
     .arg(state.angular_velocity[0], 7, 'f', 3)
     .arg(state.angular_velocity[1], 7, 'f', 3)
     .arg(state.angular_velocity[2], 7, 'f', 3));
+}
+
+void DroneStatusWidget::setState(const multiagent_pursuit_evasion_interfaces::msg::PursuerState & state)
+{
+  // Position (meters)
+  pos_label_->setText(QString("Pos:   %1 %2 %3 [m]")
+    .arg(state.position[0], 7, 'f', 3)
+    .arg(state.position[1], 7, 'f', 3)
+    .arg(state.position[2], 7, 'f', 3));
+
+  // Velocity (m/s)
+  vel_label_->setText(QString("Vel:   %1 %2 %3 [m/s]")
+    .arg(state.velocity[0], 7, 'f', 3)
+    .arg(state.velocity[1], 7, 'f', 3)
+    .arg(state.velocity[2], 7, 'f', 3));
+
+  // Attitude (quaternion displayed as all 4 components)
+  att_label_->setText(QString("Quat:  %1 %2 %3 %4")
+    .arg(state.attitude[0], 6, 'f', 3)
+    .arg(state.attitude[1], 6, 'f', 3)
+    .arg(state.attitude[2], 6, 'f', 3)
+    .arg(state.attitude[3], 6, 'f', 3));
+
+  // PursuerState doesn't have angular_velocity
+  ang_vel_label_->setText(QString("Rates: --- --- --- [rad/s]"));
 }
 
 // ============================================================================

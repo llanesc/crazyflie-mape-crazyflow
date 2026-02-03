@@ -43,7 +43,6 @@ def generate_launch_description():
                 output='screen',
                 arguments=['-p', 'ffn'],
                 additional_env={
-                    'PYTHONPATH': '/home/llanesc/multiagent_pursuit_evasion/crazyflie-mape-crazyflow/env_hardware/lib/python3.12/site-packages:' + os.environ.get('PYTHONPATH', ''),
                     'SCIPY_ARRAY_API': '1',
                 },
             ),

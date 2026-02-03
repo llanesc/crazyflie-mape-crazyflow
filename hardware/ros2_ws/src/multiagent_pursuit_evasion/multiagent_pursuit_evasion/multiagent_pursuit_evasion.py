@@ -148,7 +148,7 @@ def get_models_dir() -> Path:
 def find_checkpoint(policy_type: str) -> Path:
     """Find the checkpoint file for a policy type.
 
-    Looks for best_agent.pt or final_checkpoint.pt in models/{policy_type}/.
+    Looks for best_agent_*.pt or final_checkpoint.pt in models/{policy_type}/.
 
     Args:
         policy_type: "ffn" or "acmpc".
@@ -162,15 +162,25 @@ def find_checkpoint(policy_type: str) -> Path:
     models_dir = get_models_dir()
     policy_dir = models_dir / policy_type.lower()
 
-    # Try best_agent.pt first, then final_checkpoint.pt
-    for checkpoint_name in ['best_agent.pt', 'final_checkpoint.pt']:
-        checkpoint_path = policy_dir / checkpoint_name
-        if checkpoint_path.exists():
-            return checkpoint_path
+    # Try best_agent_*.pt first (sorted by step number, highest first)
+    best_agents = list(policy_dir.glob("best_agent_*.pt"))
+    if best_agents:
+        def get_step(p: Path) -> int:
+            try:
+                return int(p.stem.split("_")[-1])
+            except (IndexError, ValueError):
+                return 0
+        best_agents.sort(key=get_step, reverse=True)
+        return best_agents[0]
+
+    # Fall back to final_checkpoint.pt
+    final_checkpoint = policy_dir / 'final_checkpoint.pt'
+    if final_checkpoint.exists():
+        return final_checkpoint
 
     raise FileNotFoundError(
         f"Checkpoint not found in {policy_dir}. "
-        f"Please copy best_agent.pt or final_checkpoint.pt to models/{policy_type.lower()}/"
+        f"Please copy best_agent_*.pt or final_checkpoint.pt to models/{policy_type.lower()}/"
     )
 
 

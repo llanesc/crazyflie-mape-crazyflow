@@ -56,8 +56,14 @@ def load_policy(
     # Load drone params for action space bounds
     from drone_models.core import load_params
     drone_params = load_params("so_rpy", drone_model)
-    min_thrust = float(drone_params["thrust_min"]) * 4
-    max_thrust = float(drone_params["thrust_max"]) * 4
+    # min_thrust = float(drone_params["thrust_min"]) * 4
+    # max_thrust = float(drone_params["thrust_max"]) * 4
+    mass = float(drone_params["mass"]) + 4.9/1000.0
+    gravity = float(np.abs(drone_params["gravity_vec"][2]))
+    # self.min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
+    # self.max_thrust = float(drone_params["thrust_max"]) * 4
+    min_thrust = mass * gravity * 0.5 
+    max_thrust = mass * gravity * 1.5
 
     action_space = gymnasium.spaces.Box(
         low=np.array([-roll_pitch_max, -roll_pitch_max, -yaw_max, min_thrust], dtype=np.float32),

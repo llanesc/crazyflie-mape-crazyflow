@@ -13,9 +13,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
-from geometry_msgs.msg import PoseStamped, AccelStamped, TwistStamped
 from nav_msgs.msg import Odometry
-from multiagent_pursuit_evasion_interfaces.msg import Status, State
+from crazyflie_interfaces.msg import LogDataGeneric
+from multiagent_pursuit_evasion_interfaces.msg import Status, EvaderState, PursuerState
 from multiagent_pursuit_evasion_interfaces.srv import Command
 
 from functools import partial
@@ -23,31 +23,6 @@ from functools import partial
 
 STATUS_PUBLISHER_FREQUENCY = 100  # Hz
 GRAVITY = 9.81
-
-
-def quat_to_euler(x: float, y: float, z: float, w: float) -> tuple:
-    """Fast quaternion to euler (roll, pitch, yaw) conversion.
-
-    Inline implementation avoiding tf_transformations overhead.
-    """
-    # Roll (x-axis rotation)
-    sinr_cosp = 2.0 * (w * x + y * z)
-    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-    roll = np.arctan2(sinr_cosp, cosr_cosp)
-
-    # Pitch (y-axis rotation)
-    sinp = 2.0 * (w * y - z * x)
-    if abs(sinp) >= 1:
-        pitch = np.copysign(np.pi / 2, sinp)  # Use 90 degrees if out of range
-    else:
-        pitch = np.arcsin(sinp)
-
-    # Yaw (z-axis rotation)
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = np.arctan2(siny_cosp, cosy_cosp)
-
-    return roll, pitch, yaw
 
 
 class MultiAgentPursuitEvasionServer(Node):
@@ -75,9 +50,9 @@ class MultiAgentPursuitEvasionServer(Node):
         self.config = config
 
         # Extract config parameters
-        self.bb_crash_tolerance = config.get('bb_crash_tolerance', 0.2)
-        self.rr_crash_tolerance = config.get('rr_crash_tolerance', 0.2)
-        self.br_crash_tolerance = config.get('br_crash_tolerance', 0.2)
+        self.bb_collision_tolerance = config.get('bb_collision_tolerance', 0.2)
+        self.rr_collision_tolerance = config.get('rr_collision_tolerance', 0.2)
+        self.rb_collision_tolerance = config.get('rb_collision_tolerance', 0.2)
         self.boundary_size = config.get('boundary_size', 3.0)
         self.min_altitude = config.get('min_altitude', 0.1)
         self.max_altitude = config.get('max_altitude', 2.0)
@@ -86,13 +61,13 @@ class MultiAgentPursuitEvasionServer(Node):
         self.blue_cf_names = [f'blue_{i}' for i in range(1, self.n_blue + 1)]
         self.red_cf_names = [f'red_{i}' for i in range(1, self.n_red + 1)]
 
-        # Readiness tracking: [odom, body_rates] per agent
-        self.blue_ready = np.full((self.n_blue, 2), False, dtype=bool)
-        self.red_ready = np.full((self.n_red, 2), False, dtype=bool)
+        # Readiness tracking: [odom, body_rates, accel] for blue, [odom] for red
+        self.blue_ready = np.full((self.n_blue, 3), False, dtype=bool)
+        self.red_ready = np.full((self.n_red, 1), False, dtype=bool)
 
         # State tracking
-        self.cf_blue_states = [State() for _ in range(n_blue)]
-        self.cf_red_states = [State() for _ in range(n_red)]
+        self.cf_blue_states = [EvaderState() for _ in range(n_blue)]
+        self.cf_red_states = [PursuerState() for _ in range(n_red)]
 
         # Initialize all agents as active
         for state in self.cf_blue_states:
@@ -131,35 +106,29 @@ class MultiAgentPursuitEvasionServer(Node):
             self.create_subscription(
                 Odometry,
                 f'/{cf_name}/odom',
-                partial(self._odom_callback, index=n, cf_states=self.cf_blue_states, ready=self.blue_ready),
+                partial(self._odom_callback, index=n, cf_states=self.cf_blue_states, ready=self.blue_ready, ready_index=0),
                 sensor_qos)
 
             self.create_subscription(
-                TwistStamped,
+                LogDataGeneric,
                 f'/{cf_name}/body_rates',
-                partial(self._body_rates_callback, index=n, cf_states=self.cf_blue_states, ready=self.blue_ready),
+                partial(self._body_rates_callback, index=n, cf_states=self.cf_blue_states, ready=self.blue_ready, ready_index=1),
                 sensor_qos)
 
             self.create_subscription(
-                AccelStamped,
+                LogDataGeneric,
                 f'/{cf_name}/accel',
-                partial(self._acceleration_callback, index=n, cf_states=self.cf_blue_states),
+                partial(self._acceleration_callback, index=n, cf_states=self.cf_blue_states, ready=self.blue_ready, ready_index=2),
                 sensor_qos)
 
-        # Create subscriptions for red agents
+        # Create subscriptions for red agents (odom only, no body_rates)
         for n in range(n_red):
             cf_name = self.red_cf_names[n]
 
             self.create_subscription(
                 Odometry,
                 f'/{cf_name}/odom',
-                partial(self._odom_callback, index=n, cf_states=self.cf_red_states, ready=self.red_ready),
-                sensor_qos)
-
-            self.create_subscription(
-                TwistStamped,
-                f'/{cf_name}/body_rates',
-                partial(self._body_rates_callback, index=n, cf_states=self.cf_red_states, ready=self.red_ready),
+                partial(self._odom_callback, index=n, cf_states=self.cf_red_states, ready=self.red_ready, ready_index=0),
                 sensor_qos)
 
         # Publisher for status (BEST_EFFORT to match subscribers)
@@ -187,7 +156,7 @@ class MultiAgentPursuitEvasionServer(Node):
             f'MAPE Server initialized: {n_blue} blue vs {n_red} red agents'
         )
         self.get_logger().info(
-            f'Collision tolerances: BB={self.bb_crash_tolerance}, RR={self.rr_crash_tolerance}, BR={self.br_crash_tolerance}'
+            f'Collision tolerances: BB={self.bb_collision_tolerance}, RR={self.rr_collision_tolerance}, BR={self.rb_collision_tolerance}'
         )
         self.get_logger().info(
             f'Boundary: size={self.boundary_size}, alt=[{self.min_altitude}, {self.max_altitude}]'
@@ -235,77 +204,94 @@ class MultiAgentPursuitEvasionServer(Node):
                     missing.append('odom')
                 if not self.blue_ready[i, 1]:
                     missing.append('body_rates')
+                if not self.blue_ready[i, 2]:
+                    missing.append('accel')
                 self.get_logger().info(f'Blue {i} ({self.blue_cf_names[i]}) missing: {missing}')
         for i in range(self.n_red):
             if not np.all(self.red_ready[i]):
                 missing = []
                 if not self.red_ready[i, 0]:
                     missing.append('odom')
-                if not self.red_ready[i, 1]:
-                    missing.append('body_rates')
                 self.get_logger().info(f'Red {i} ({self.red_cf_names[i]}) missing: {missing}')
 
-    def _odom_callback(self, msg: Odometry, index: int, cf_states: list, ready: np.ndarray):
+    def _odom_callback(self, msg: Odometry, index: int, cf_states: list, ready: np.ndarray, ready_index: int):
         """Handle odometry message (contains pose and linear velocity)."""
         cf_states[index].position = [
             msg.pose.pose.position.x,
             msg.pose.pose.position.y,
             msg.pose.pose.position.z
         ]
-        cf_states[index].attitude = list(quat_to_euler(
+        cf_states[index].attitude = [
             msg.pose.pose.orientation.x,
             msg.pose.pose.orientation.y,
             msg.pose.pose.orientation.z,
             msg.pose.pose.orientation.w
-        ))
+        ]
         cf_states[index].velocity = [
             msg.twist.twist.linear.x,
             msg.twist.twist.linear.y,
             msg.twist.twist.linear.z
         ]
-        ready[index, 0] = True
+        ready[index, ready_index] = True
 
-    def _body_rates_callback(self, msg: TwistStamped, index: int, cf_states: list, ready: np.ndarray):
-        """Handle body rates message (angular velocity)."""
-        # Skip zero body rates messages (estimator not converged or packet corruption)
-        # if (msg.twist.angular.x == 0.0 and
-        #     msg.twist.angular.y == 0.0 and
-        #     msg.twist.angular.z == 0.0):
-        #     self.get_logger().debug(f'Skipping zero body_rates for agent {index}')
-        #     return
+    def _body_rates_callback(self, msg: LogDataGeneric, index: int, cf_states: list, ready: np.ndarray, ready_index: int):
+        """Handle body rates message (angular velocity).
 
+        Values are compressed (multiplied by 1000), so divide to get actual rad/s.
+        msg.values contains [roll_rate, pitch_rate, yaw_rate].
+        """
         cf_states[index].angular_velocity = [
-            msg.twist.angular.x,
-            msg.twist.angular.y,
-            msg.twist.angular.z
+            msg.values[0] / 1000.0,
+            msg.values[1] / 1000.0,
+            msg.values[2] / 1000.0
         ]
-        ready[index, 1] = True
+        ready[index, ready_index] = True
 
-    def _acceleration_callback(self, msg: AccelStamped, index: int, cf_states: list):
+    def _acceleration_callback(self, msg: LogDataGeneric, index: int, cf_states: list, ready: np.ndarray, ready_index: int):
         """Handle acceleration message.
 
-        Values are global acceleration in m/s^2 with gravity already removed.
+        Values are compressed (multiplied by 1000) and include gravity.
+        Divide by 1000 and subtract gravity from z to get actual acceleration.
+        msg.values contains [accel_x, accel_y, accel_z].
         """
         cf_states[index].acceleration = [
-            msg.accel.linear.x,
-            msg.accel.linear.y,
-            msg.accel.linear.z
+            msg.values[0] / 1000.0,
+            msg.values[1] / 1000.0,
+            msg.values[2] / 1000.0 - GRAVITY
         ]
+        ready[index, ready_index] = True
 
-    def _states_to_np(self, states: list) -> np.ndarray:
-        """Convert State list to numpy array.
+    def _evader_states_to_np(self, states: list) -> np.ndarray:
+        """Convert EvaderState list to numpy array.
 
         Returns:
-            Array of shape (n_agents, 13): [pos(3), vel(3), rpy(3), ang_vel(3), active(1)]
+            Array of shape (n_agents, 18): [pos(3), vel(3), quat(4), ang_vel(3), accel(3), active(1)]
         """
-        np_states = np.zeros((len(states), 13))
+        np_states = np.zeros((len(states), 18))
         for idx, state in enumerate(states):
             np_states[idx, :] = np.array([
-                *state.position,      # 0:3
-                *state.velocity,      # 3:6
-                *state.attitude,      # 6:9
-                *state.angular_velocity,  # 9:12
-                float(state.active)   # 12
+                *state.position,          # 0:3
+                *state.velocity,          # 3:6
+                *state.attitude,          # 6:10 (quaternion)
+                *state.angular_velocity,  # 10:13
+                *state.acceleration,      # 13:16
+                float(state.active)       # 17
+            ])
+        return np_states
+
+    def _pursuer_states_to_np(self, states: list) -> np.ndarray:
+        """Convert PursuerState list to numpy array.
+
+        Returns:
+            Array of shape (n_agents, 11): [pos(3), vel(3), quat(4), active(1)]
+        """
+        np_states = np.zeros((len(states), 11))
+        for idx, state in enumerate(states):
+            np_states[idx, :] = np.array([
+                *state.position,    # 0:3
+                *state.velocity,    # 3:6
+                *state.attitude,    # 6:10 (quaternion)
+                float(state.active) # 10
             ])
         return np_states
 
@@ -320,8 +306,8 @@ class MultiAgentPursuitEvasionServer(Node):
 
         Uses vectorized meshgrid indexing to exclude self-collisions.
         """
-        blue_states = self._states_to_np(self.cf_blue_states)
-        red_states = self._states_to_np(self.cf_red_states)
+        blue_states = self._evader_states_to_np(self.cf_blue_states)
+        red_states = self._pursuer_states_to_np(self.cf_red_states)
 
         blue_pos = blue_states[:, 0:3]
         red_pos = red_states[:, 0:3]
@@ -329,24 +315,24 @@ class MultiAgentPursuitEvasionServer(Node):
         # Blue-blue collisions (vectorized, excluding self via meshgrid indexing)
         # Computes pairwise distances and uses permutation indexing to exclude diagonal
         bb_dist = norm(blue_pos[self.blue_meshgrid, :] - blue_pos[:, None, :], axis=2, keepdims=True)
-        bb_collision = bb_dist < self.bb_crash_tolerance
+        bb_collision = bb_dist < self.bb_collision_tolerance
         # Index with [meshgrid[:-1,:].T, permutations[:,1:]] to get off-diagonal elements
         bb_crash = np.any(bb_collision[self.blue_meshgrid[:-1, :].T, self.blue_permutations[:, 1:]], axis=1).flatten()
 
         # Red-red collisions (vectorized, excluding self via meshgrid indexing)
         rr_dist = norm(red_pos[self.red_meshgrid, :] - red_pos[:, None, :], axis=2, keepdims=True)
-        rr_collision = rr_dist < self.rr_crash_tolerance
+        rr_collision = rr_dist < self.rr_collision_tolerance
         rr_crash = np.any(rr_collision[self.red_meshgrid[:-1, :].T, self.red_permutations[:, 1:]], axis=1).flatten()
 
         # Blue-red captures: blue dies if caught by active red (vectorized)
         # Use red_meshgrid truncated to n_blue rows for broadcasting
         br_dist = norm(red_pos[self.red_meshgrid[0:self.n_blue, :], :] - blue_pos[:, None, :], axis=2, keepdims=True)
-        br_crash = np.any((br_dist < self.br_crash_tolerance) * red_states[:, [-1]], axis=1).flatten()
+        br_crash = np.any((br_dist < self.rb_collision_tolerance) * red_states[:, [-1]], axis=1).flatten()
 
         # Red-blue captures: red dies after capturing active blue (vectorized)
         # Use blue_meshgrid truncated to n_red rows for broadcasting
         rb_dist = norm(blue_pos[self.blue_meshgrid[0:self.n_red, :], :] - red_pos[:, None, :], axis=2, keepdims=True)
-        rb_crash = np.any((rb_dist < self.br_crash_tolerance) * blue_states[:, [-1]], axis=1).flatten()
+        rb_crash = np.any((rb_dist < self.rb_collision_tolerance) * blue_states[:, [-1]], axis=1).flatten()
 
         # Boundary violations (blue only)
         out_of_bounds = (
@@ -447,9 +433,9 @@ def main():
 
     # Default config for testing
     config = {
-        'bb_crash_tolerance': 0.2,
-        'rr_crash_tolerance': 0.2,
-        'br_crash_tolerance': 0.2,
+        'bb_collision_tolerance': 0.2,
+        'rr_collision_tolerance': 0.2,
+        'rb_collision_tolerance': 0.2,
         'boundary_size': 3.0,
         'min_altitude': 0.1,
         'max_altitude': 2.0,

@@ -4,25 +4,25 @@ fileversion: 3
 robots:
   blue_1:
     enabled: true
-    uri: radio://0/80/2M/E7E7E7E7E0
+    uri: radio://0/50/2M/E7E7E7E7E0
     initial_position: [2.0, -0.25, 0.0]
     type: cf_blue_hw  # see robot_types
   
   blue_2:
     enabled: true
-    uri: radio://0/80/2M/E7E7E7E7E1
+    uri: radio://0/50/2M/E7E7E7E7E1
     initial_position: [2.0, 0.25, 0.0]
     type: cf_blue_hw  # see robot_types
 
   red_1:
     enabled: true
-    uri: radio://1/82/2M/E7E7E7E7E2
+    uri: radio://1/100/2M/E7E7E7E7E2
     initial_position: [-0.24, -0.64, 0.0] # 1.19
     type: cf_red_hw  # see robot_types
 
   red_2:
     enabled: true
-    uri: radio://1/82/2M/E7E7E7E7E3
+    uri: radio://1/100/2M/E7E7E7E7E3
     initial_position: [-0.23, -0.18, 0.0] #1.04
     type: cf_red_hw  # see robot_types
 
@@ -61,7 +61,7 @@ robots:
 robot_types:
   cf_blue_hw:
     motion_capture:
-      tracking: "librigidbodytracker"
+      tracking: "vendor"
       marker: default_single_marker
       dynamics: default
     big_quad: false
@@ -71,15 +71,15 @@ robot_types:
     firmware_logging:
       enabled: true
       default_topics:
-        odom:
-          frequency: 100
-      custom_topics:
-        body_rates:
-          frequency: 100
-          vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
-        accel:
+        pose:
           frequency: 50
-          vars: ["stateEstimateZ.ax", "stateEstimateZ.ay", "stateEstimateZ.az"]
+      # custom_topics:
+      #   body_rates:
+      #     frequency: 50
+      #     vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
+      #   accel:
+      #     frequency: 50
+      #     vars: ["stateEstimateZ.ax", "stateEstimateZ.ay", "stateEstimateZ.az"]
     firmware_params:
       ring:
         effect: 7 # 6: double spinner, 7: solid color, 16: packetRate
@@ -90,7 +90,7 @@ robot_types:
 
   cf_red_hw:
     motion_capture:
-      tracking: "librigidbodytracker"
+      tracking: "vendor"
       marker: default_single_marker
       dynamics: default
     big_quad: false
@@ -100,7 +100,7 @@ robot_types:
     firmware_logging:
       enabled: true
       default_topics:
-        odom:
+        pose:
           frequency: 50
     firmware_params:
       ring:
@@ -164,12 +164,12 @@ all:
   # robots/drone_name to set per drone)
   firmware_logging:
     enabled: true
-    # default_topics:
-     # remove to disable default topic
+    default_topics:
+    #  remove to disable default topic
       # pose:
       #   frequency: 10 # Hz
-      # status:
-      #   frequency: 1 # Hz
+      status:
+        frequency: 1 # Hz
     #custom_topics:
     #  topic_name1:
     #    frequency: 10 # Hz

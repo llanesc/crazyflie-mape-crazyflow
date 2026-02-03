@@ -21,7 +21,8 @@
 #include <rviz_common/ros_integration/ros_node_abstraction_iface.hpp>
 
 #include "multiagent_pursuit_evasion_interfaces/msg/status.hpp"
-#include "multiagent_pursuit_evasion_interfaces/msg/state.hpp"
+#include "multiagent_pursuit_evasion_interfaces/msg/evader_state.hpp"
+#include "multiagent_pursuit_evasion_interfaces/msg/pursuer_state.hpp"
 #include "multiagent_pursuit_evasion_interfaces/srv/command.hpp"
 
 namespace mape_rviz_plugin
@@ -33,7 +34,8 @@ public:
   explicit DroneStatusWidget(const QString & name, QWidget * parent = nullptr);
   void setActive(bool active);
   void setName(const QString & name);
-  void setState(const multiagent_pursuit_evasion_interfaces::msg::State & state);
+  void setState(const multiagent_pursuit_evasion_interfaces::msg::EvaderState & state);
+  void setState(const multiagent_pursuit_evasion_interfaces::msg::PursuerState & state);
 
 private:
   QLabel * name_label_;
