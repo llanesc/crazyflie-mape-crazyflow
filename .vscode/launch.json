@@ -2,6 +2,21 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Train MAPPO FFN",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/train_mappo_ffn.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--experiment", "action_penalty",
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
+            },
+            "cwd": "${workspaceFolder}"
+        },
+        {
             "name": "Eval MAPPO FFN",
             "type": "debugpy",
             "request": "launch",
@@ -9,10 +24,13 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "--experiment", "curriculum_training",
+                "--experiment", "action_penalty",
+                "--checkpoint", "run_20260131044551",
                 "--n-episodes", "10",
                 "--device", "cpu",
-                "--render"
+                "--render",
+                "--deterministic"
+
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
@@ -27,13 +45,14 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "--experiment", "curriculum_training",
-                "--checkpoint", "run_20260121211922",
-                "--level", "4",
+                "--experiment", "action_penalty",
+                "--checkpoint", "run_20260203031242",
+                "--level", "7",
                 "--n-episodes", "10",
                 "--device", "cpu",
+                "--deterministic",
                 "--render",
-                "--deterministic"
+                "--step",  "1m"
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"

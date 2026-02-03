@@ -9,6 +9,15 @@
     "files.exclude": {
         "env_crazyflow/**": true,
         "env_hardware/**": true,
-        "results/**": true
+        "results/**/*.pt": true,
+        "results/**/events.out.tfevents*": true
+    },
+    "files.watcherExclude": {
+        "results/**/*.pt": true,
+        "results/**/events.out.tfevents*": true
+    },
+    "search.exclude": {
+        "results/**/*.pt": true,
+        "results/**/events.out.tfevents*": true
     }
 }
