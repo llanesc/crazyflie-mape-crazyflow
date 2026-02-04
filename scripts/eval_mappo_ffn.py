@@ -88,16 +88,15 @@ def find_checkpoints(search_dir: Path) -> list[Path]:
     """Find all checkpoint files in a directory.
 
     Searches for best_agent_*.pt, final_checkpoint.pt, and agent_*.pt files.
-    Priority: best_agent_*.pt > final_checkpoint.pt > periodic checkpoints (by step number).
+    Returns checkpoints sorted by step number (highest first), so the latest
+    checkpoint is always first regardless of type.
 
     Args:
         search_dir: Directory to search in.
 
     Returns:
-        List of checkpoint paths, with best_agent first if it exists.
+        List of checkpoint paths sorted by step number (latest first).
     """
-    checkpoints = []
-
     def get_step(p: Path) -> int:
         """Extract step number from filename."""
         try:
@@ -106,23 +105,25 @@ def find_checkpoints(search_dir: Path) -> list[Path]:
         except (IndexError, ValueError):
             return 0
 
-    # Priority 1: best_agent_*.pt (always preferred)
-    best_agents = list(search_dir.glob("**/best_agent_*.pt"))
-    if best_agents:
-        # Sort by step number (highest first)
-        best_agents.sort(key=get_step, reverse=True)
-        checkpoints.extend(best_agents)
+    # Collect all checkpoint types
+    checkpoints = []
 
-    # Priority 2: final_checkpoint.pt
+    # best_agent_*.pt
+    best_agents = list(search_dir.glob("**/best_agent_*.pt"))
+    checkpoints.extend(best_agents)
+
+    # periodic checkpoints (agent_*.pt in checkpoints folder)
+    periodic = list(search_dir.glob("**/checkpoints/agent_*.pt"))
+    checkpoints.extend(periodic)
+
+    # Sort all by step number (highest first) - latest checkpoint wins
+    checkpoints.sort(key=get_step, reverse=True)
+
+    # final_checkpoint.pt goes last (no step number, fallback only)
     final_checkpoints = list(search_dir.glob("**/final_checkpoint.pt"))
     if final_checkpoints:
         final_checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         checkpoints.extend(final_checkpoints)
-
-    # Priority 3: periodic checkpoints (sorted by step number, highest first)
-    periodic = list(search_dir.glob("**/checkpoints/agent_*.pt"))
-    periodic.sort(key=get_step, reverse=True)
-    checkpoints.extend(periodic)
 
     return checkpoints
 
@@ -262,6 +263,8 @@ Example:
     # Debug
     parser.add_argument("--verbose", action="store_true",
                         help="Print per-episode outcomes for debugging")
+    parser.add_argument("--debug-timing", action="store_true",
+                        help="Print detailed timing breakdown per step (for performance debugging)")
 
     return parser.parse_args()
 
@@ -412,16 +415,20 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
         episode_out_of_bounds = 0
 
         done = False
+        policy_time = 0.0
+        env_time = 0.0
         while not done:
             # Get actions from policy
             actions = {}
+            t0 = time.perf_counter()
             with torch.no_grad():
                 for agent_name in env.possible_agents:
                     obs = obs_dict[agent_name]
                     obs_tensor = torch.tensor(obs, dtype=torch.float32, device=policy.device)
 
-                    # Get action from policy
-                    action, log_std, _ = policy.compute({"states": obs_tensor}, role="")
+                    # Get action from policy (SKRL 2.0 format)
+                    action, outputs = policy.compute({"observations": obs_tensor}, role="")
+                    log_std = outputs["log_std"]
                     if not deterministic:
                         # Sample from distribution using returned log_std
                         std = torch.exp(log_std)
@@ -435,9 +442,12 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                         print(f"      Obs shape: {obs.shape}, Obs[0][:10]: {obs[0][:10] if len(obs.shape) > 1 else obs[:10]}")
                         print(f"      Action (world 0): {actions[agent_name][0] if len(actions[agent_name].shape) > 1 else actions[agent_name]}")
                         print(f"      log_std: {log_std.cpu().numpy()}")
+            policy_time += time.perf_counter() - t0
 
             # Step environment
+            t0 = time.perf_counter()
             obs_dict, rewards, terminated, truncated, info = env.step(actions)
+            env_time += time.perf_counter() - t0
 
             # Debug: print positions after first step for verbose mode
             if verbose and step == 0:
@@ -618,6 +628,9 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                     if sleep_time > 0:
                         time.sleep(sleep_time)
                     last_render_time = time.perf_counter()
+
+        # Print timing info
+        print(f"  Episode timing: policy={policy_time*1000:.1f}ms, env={env_time*1000:.1f}ms, steps={step}")
 
         # Episode finished - collect metrics
         # Determine termination reason for each world
@@ -853,6 +866,8 @@ def main():
         reward_pursuer_proximity_decay=learning_config.get("rewards", {}).get("pursuer_proximity_decay", 2.0) if learning_config else 2.0,
         # Episode length
         episode_length_s=learning_config.get("episode_length_s", 20.0) if learning_config else 20.0,
+        # Debug timing (if requested)
+        debug_timing=args.debug_timing,
     )
 
     # Handle curriculum level selection

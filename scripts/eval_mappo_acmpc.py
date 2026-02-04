@@ -76,16 +76,15 @@ def find_checkpoints(search_dir: Path) -> list[Path]:
     """Find all checkpoint files in a directory.
 
     Searches for best_agent_*.pt, final_checkpoint.pt, and agent_*.pt files.
-    Priority: best_agent_*.pt > final_checkpoint.pt > periodic checkpoints (by step number).
+    Returns checkpoints sorted by step number (highest first), so the latest
+    checkpoint is always first regardless of type.
 
     Args:
         search_dir: Directory to search in.
 
     Returns:
-        List of checkpoint paths, with best_agent first if it exists.
+        List of checkpoint paths sorted by step number (latest first).
     """
-    checkpoints = []
-
     def get_step(p: Path) -> int:
         """Extract step number from filename."""
         try:
@@ -94,23 +93,25 @@ def find_checkpoints(search_dir: Path) -> list[Path]:
         except (IndexError, ValueError):
             return 0
 
-    # Priority 1: best_agent_*.pt (always preferred)
-    best_agents = list(search_dir.glob("**/best_agent_*.pt"))
-    if best_agents:
-        # Sort by step number (highest first)
-        best_agents.sort(key=get_step, reverse=True)
-        checkpoints.extend(best_agents)
+    # Collect all checkpoint types
+    checkpoints = []
 
-    # Priority 2: final_checkpoint.pt
+    # best_agent_*.pt
+    best_agents = list(search_dir.glob("**/best_agent_*.pt"))
+    checkpoints.extend(best_agents)
+
+    # periodic checkpoints (agent_*.pt in checkpoints folder)
+    periodic = list(search_dir.glob("**/checkpoints/agent_*.pt"))
+    checkpoints.extend(periodic)
+
+    # Sort all by step number (highest first) - latest checkpoint wins
+    checkpoints.sort(key=get_step, reverse=True)
+
+    # final_checkpoint.pt goes last (no step number, fallback only)
     final_checkpoints = list(search_dir.glob("**/final_checkpoint.pt"))
     if final_checkpoints:
         final_checkpoints.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         checkpoints.extend(final_checkpoints)
-
-    # Priority 3: periodic checkpoints (sorted by step number, highest first)
-    periodic = list(search_dir.glob("**/checkpoints/agent_*.pt"))
-    periodic.sort(key=get_step, reverse=True)
-    checkpoints.extend(periodic)
 
     return checkpoints
 
@@ -395,8 +396,9 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                     obs = obs_dict[agent_name]
                     obs_tensor = torch.tensor(obs, dtype=torch.float32, device=policy.device)
 
-                    # Get action from policy
-                    action, log_std, _ = policy.compute({"states": obs_tensor}, role="")
+                    # Get action from policy (SKRL 2.0 format)
+                    action, outputs = policy.compute({"observations": obs_tensor}, role="")
+                    log_std = outputs["log_std"]
                     if not deterministic:
                         # Sample from distribution using returned log_std
                         std = torch.exp(log_std)

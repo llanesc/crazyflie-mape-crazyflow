@@ -152,6 +152,9 @@ class RedVsBlueEnvConfig:
     # Device
     device: str = "cpu"
 
+    # Debug
+    debug_timing: bool = False  # Print detailed timing per step (for performance debugging)
+
     def __post_init__(self):
         """Compute derived values and load physical parameters."""
         self.n_blue = self.n_pairs

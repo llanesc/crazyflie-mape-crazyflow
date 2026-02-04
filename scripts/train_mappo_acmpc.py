@@ -48,7 +48,7 @@ from datetime import datetime
 
 import numpy as np
 import torch
-from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_DEFAULT_CONFIG
+from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_CFG
 from skrl.memories.torch import RandomMemory
 from skrl.resources.preprocessors.torch import RunningStandardScaler
 from skrl.resources.schedulers.torch import KLAdaptiveLR
@@ -96,7 +96,7 @@ class TerminationLoggingWrapper:
         log_interval: int = 100,
         curriculum_manager: Optional[CurriculumManager] = None,
         experiment_dir: Optional[Path] = None,
-        checkpoint_retention_interval: int = 500000,
+        # checkpoint_retention_interval: int = 500000,  # Disabled - using SKRL default checkpointing
         initial_timestep: int = 0,
     ):
         """Initialize the wrapper.
@@ -106,8 +106,7 @@ class TerminationLoggingWrapper:
             raw_env: Raw RedVsBlueEnv for accessing termination info directly.
             log_interval: Interval (in steps) for logging to TensorBoard.
             curriculum_manager: Optional curriculum manager for progressive difficulty.
-            experiment_dir: Directory to save best_agent.pt checkpoint.
-            checkpoint_retention_interval: Keep checkpoints at multiples of this interval (default 500k).
+            experiment_dir: Directory for experiment outputs.
             initial_timestep: Starting timestep when resuming training.
         """
         # Use object.__setattr__ to avoid triggering our custom __getattr__
@@ -122,7 +121,7 @@ class TerminationLoggingWrapper:
         object.__setattr__(self, '_curriculum_manager', curriculum_manager)
         object.__setattr__(self, '_n_worlds', raw_env.cfg.n_worlds)
         object.__setattr__(self, '_experiment_dir', experiment_dir)
-        object.__setattr__(self, '_checkpoint_retention_interval', checkpoint_retention_interval)
+        # object.__setattr__(self, '_checkpoint_retention_interval', checkpoint_retention_interval)  # Disabled
 
         # Track cumulative reward components per world (episode returns)
         # Will be initialized on first step when we know the component names
@@ -179,9 +178,9 @@ class TerminationLoggingWrapper:
         n_worlds = self._n_worlds
 
         # Collision/violation events (not termination reasons, just individual agent events)
-        # Divide by 2 because each collision involves 2 agents
-        self._collision_counts["collision/bb_collision"] += term_events["bb_collision"] * n_worlds / 2
-        self._collision_counts["collision/rr_collision"] += term_events["rr_collision"] * n_worlds / 2
+        # Counts per-agent: if 2 reds collide, that's 2 rr_collisions
+        self._collision_counts["collision/bb_collision"] += term_events["bb_collision"] * n_worlds
+        self._collision_counts["collision/rr_collision"] += term_events["rr_collision"] * n_worlds
         self._collision_counts["collision/rb_collision"] += term_events["rb_collision"] * n_worlds
         self._collision_counts["collision/out_of_bounds"] += term_events["out_of_bounds"] * n_worlds
 
@@ -310,42 +309,44 @@ class TerminationLoggingWrapper:
         object.__setattr__(self, '_collision_counts', defaultdict(float))
         object.__setattr__(self, '_completed_episode_components', defaultdict(list))
 
-        # Clean up old checkpoints (keep only those at retention interval multiples)
-        self._cleanup_checkpoints()
+        # Disabled - using SKRL's default checkpoint behavior
+        # # Clean up old checkpoints (keep only those at retention interval multiples)
+        # self._cleanup_checkpoints()
 
-    def _cleanup_checkpoints(self):
-        """Delete checkpoints that are not at retention interval multiples.
-
-        Keeps checkpoints at multiples of checkpoint_retention_interval (e.g., 500k, 1M, 1.5M).
-        Always keeps best_agent.pt and final_checkpoint.pt.
-        """
-        if self._experiment_dir is None:
-            return
-
-        checkpoints_dir = self._experiment_dir / "checkpoints"
-        if not checkpoints_dir.exists():
-            return
-
-        retention_interval = self._checkpoint_retention_interval
-
-        # Find all numbered checkpoint files
-        for checkpoint_file in checkpoints_dir.glob("agent_*.pt"):
-            # Skip non-numbered files like best_agent.pt
-            stem = checkpoint_file.stem
-            if not stem.startswith("agent_"):
-                continue
-
-            try:
-                step_str = stem.split("_")[1]
-                if not step_str.isdigit():
-                    continue
-                step = int(step_str)
-            except (IndexError, ValueError):
-                continue
-
-            # Delete if not at a retention interval multiple
-            if step % retention_interval != 0:
-                checkpoint_file.unlink()
+    # Disabled - using SKRL's default checkpoint behavior
+    # def _cleanup_checkpoints(self):
+    #     """Delete checkpoints that are not at retention interval multiples.
+    #
+    #     Keeps checkpoints at multiples of checkpoint_retention_interval (e.g., 500k, 1M, 1.5M).
+    #     Always keeps best_agent.pt and final_checkpoint.pt.
+    #     """
+    #     if self._experiment_dir is None:
+    #         return
+    #
+    #     checkpoints_dir = self._experiment_dir / "checkpoints"
+    #     if not checkpoints_dir.exists():
+    #         return
+    #
+    #     retention_interval = self._checkpoint_retention_interval
+    #
+    #     # Find all numbered checkpoint files
+    #     for checkpoint_file in checkpoints_dir.glob("agent_*.pt"):
+    #         # Skip non-numbered files like best_agent.pt
+    #         stem = checkpoint_file.stem
+    #         if not stem.startswith("agent_"):
+    #             continue
+    #
+    #         try:
+    #             step_str = stem.split("_")[1]
+    #             if not step_str.isdigit():
+    #                 continue
+    #             step = int(step_str)
+    #         except (IndexError, ValueError):
+    #             continue
+    #
+    #         # Delete if not at a retention interval multiple
+    #         if step % retention_interval != 0:
+    #             checkpoint_file.unlink()
 
     def close(self):
         """Close environment."""
@@ -755,48 +756,66 @@ def main():
             "value": shared_critic,
         }
 
-    # MAPPO configuration
-    mappo_cfg = MAPPO_DEFAULT_CONFIG.copy()
-    mappo_cfg.update({
-        "rollouts": training_cfg["rollouts"],
-        "learning_epochs": training_cfg["learning_epochs"],
-        "mini_batches": training_cfg["mini_batches"],
-        "discount_factor": training_cfg["gamma"],
-        "lambda": training_cfg["gae_lambda"],
-        "learning_rate": training_cfg["learning_rate"],
-        "grad_norm_clip": training_cfg["grad_norm_clip"],
-        "entropy_loss_scale": training_cfg["entropy_loss_scale"],
-        "value_loss_scale": training_cfg["value_loss_scale"],
-        "ratio_clip": training_cfg["ratio_clip"],
-        "value_clip": training_cfg["value_clip"],
-        "kl_threshold": training_cfg["kl_threshold"],
-        "experiment": {
+    # MAPPO configuration (SKRL 2.0 uses dataclass config)
+    # SKRL 2.0 expand() requires agent-specific dicts for kwargs fields
+    possible_agents = env.possible_agents
+
+    # Prepare optional config values (as agent-specific dicts for SKRL 2.0)
+    lr_scheduler_class = None
+    lr_scheduler_kwargs = {agent: {} for agent in possible_agents}  # Agent-specific empty dicts
+    lr_scheduler = training_cfg["learning_rate_scheduler"]
+    if lr_scheduler == "KLAdaptiveLR":
+        lr_scheduler_class = KLAdaptiveLR
+        base_kwargs = training_cfg["learning_rate_scheduler_kwargs"]
+        lr_scheduler_kwargs = {agent: base_kwargs.copy() for agent in possible_agents}
+        print(f"  - learning_rate_scheduler: KLAdaptiveLR")
+        print(f"  - learning_rate_scheduler_kwargs: {base_kwargs}")
+    elif lr_scheduler == "StepLR":
+        lr_scheduler_class = StepLR
+        base_kwargs = training_cfg["learning_rate_scheduler_kwargs"]
+        lr_scheduler_kwargs = {agent: base_kwargs.copy() for agent in possible_agents}
+        print(f"  - learning_rate_scheduler: StepLR")
+        print(f"  - learning_rate_scheduler_kwargs: {base_kwargs}")
+
+    value_preprocessor_class = None
+    value_preprocessor_kwargs = {agent: {} for agent in possible_agents}  # Agent-specific empty dicts
+    value_preprocessor = training_cfg["value_preprocessor"]
+    if value_preprocessor == "RunningStandardScaler":
+        value_preprocessor_class = RunningStandardScaler
+        base_kwargs = {"size": 1, "device": device}
+        value_preprocessor_kwargs = {agent: base_kwargs.copy() for agent in possible_agents}
+        print(f"  - value_preprocessor: RunningStandardScaler")
+
+    # State/observation preprocessor kwargs (agent-specific empty dicts)
+    obs_preprocessor_kwargs = {agent: {} for agent in possible_agents}
+    state_preprocessor_kwargs = {agent: {} for agent in possible_agents}
+
+    mappo_cfg = MAPPO_CFG(
+        rollouts=training_cfg["rollouts"],
+        learning_epochs=training_cfg["learning_epochs"],
+        mini_batches=training_cfg["mini_batches"],
+        discount_factor=training_cfg["gamma"],
+        lambda_=training_cfg["gae_lambda"],
+        learning_rate=training_cfg["learning_rate"],
+        learning_rate_scheduler=lr_scheduler_class,
+        learning_rate_scheduler_kwargs=lr_scheduler_kwargs,
+        observation_preprocessor_kwargs=obs_preprocessor_kwargs,
+        state_preprocessor_kwargs=state_preprocessor_kwargs,
+        grad_norm_clip=training_cfg["grad_norm_clip"],
+        entropy_loss_scale=training_cfg["entropy_loss_scale"],
+        value_loss_scale=training_cfg["value_loss_scale"],
+        ratio_clip=training_cfg["ratio_clip"],
+        value_clip=training_cfg["value_clip"],
+        kl_threshold=training_cfg["kl_threshold"],
+        value_preprocessor=value_preprocessor_class,
+        value_preprocessor_kwargs=value_preprocessor_kwargs,
+        experiment={
             "directory": str(results_dir),
             "experiment_name": run_name,
             "write_interval": 100,
             "checkpoint_interval": 5000,
         },
-    })
-
-    # Add learning rate scheduler if configured
-    lr_scheduler = training_cfg["learning_rate_scheduler"]
-    if lr_scheduler == "KLAdaptiveLR":
-        mappo_cfg["learning_rate_scheduler"] = KLAdaptiveLR
-        mappo_cfg["learning_rate_scheduler_kwargs"] = training_cfg["learning_rate_scheduler_kwargs"]
-        print(f"  - learning_rate_scheduler: KLAdaptiveLR")
-        print(f"  - learning_rate_scheduler_kwargs: {training_cfg['learning_rate_scheduler_kwargs']}")
-    elif lr_scheduler == "StepLR":
-        mappo_cfg["learning_rate_scheduler"] = StepLR
-        mappo_cfg["learning_rate_scheduler_kwargs"] = training_cfg["learning_rate_scheduler_kwargs"]
-        print(f"  - learning_rate_scheduler: StepLR")
-        print(f"  - learning_rate_scheduler_kwargs: {training_cfg['learning_rate_scheduler_kwargs']}")
-
-    # Add value preprocessor if configured
-    value_preprocessor = training_cfg["value_preprocessor"]
-    if value_preprocessor == "RunningStandardScaler":
-        mappo_cfg["value_preprocessor"] = RunningStandardScaler
-        mappo_cfg["value_preprocessor_kwargs"] = {"size": 1, "device": device}
-        print(f"  - value_preprocessor: RunningStandardScaler")
+    )
 
     # Create MAPPO agent
     agent = MAPPO(
@@ -806,7 +825,7 @@ def main():
         cfg=mappo_cfg,
         observation_spaces={agent_name: env.observation_space(agent_name) for agent_name in env.possible_agents},
         action_spaces={agent_name: env.action_space(agent_name) for agent_name in env.possible_agents},
-        shared_observation_spaces={agent_name: raw_env.shared_observation_space for agent_name in env.possible_agents},
+        state_spaces={agent_name: raw_env.shared_observation_space for agent_name in env.possible_agents},  # SKRL 2.0: renamed from shared_observation_spaces
         device=device,
     )
 
@@ -843,6 +862,7 @@ def main():
     total_timesteps = timesteps + initial_timestep
     trainer_cfg = {
         "timesteps": total_timesteps,
+        "initial_timestep": initial_timestep,  # Resume from this timestep
         "headless": not args.render,  # Enable rendering if --render flag is set
         "render_interval": args.render_interval,  # SKRL 2.0: render every N timesteps
     }
@@ -854,8 +874,6 @@ def main():
         agents=agent,
         cfg=trainer_cfg,
     )
-    # Manually set initial_timestep since SKRL's Trainer doesn't read it from config
-    trainer.initial_timestep = initial_timestep
 
     if initial_timestep > 0:
         print(f"Training from step {initial_timestep} to {total_timesteps} ({timesteps} additional steps)")

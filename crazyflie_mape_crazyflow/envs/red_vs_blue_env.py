@@ -4,6 +4,7 @@ Blue agents (evaders) are controlled by learned policies.
 Red agents (pursuers) use scripted control (ProNav or Pure Pursuit).
 """
 
+import time
 from functools import partial
 from typing import Any
 
@@ -1089,39 +1090,66 @@ class RedVsBlueEnv(gym.Env):
         Returns:
             observations, rewards, terminated, truncated, info
         """
+        debug_timing = self.cfg.debug_timing
+        if debug_timing:
+            t_start = time.perf_counter()
+            timings = {}
+
         # Save current blue cmd before updating (for action smoothness penalty)
         self.last_blue_cmd = self.blue_cmd
 
         # Process blue agent actions
+        if debug_timing:
+            t0 = time.perf_counter()
         self._process_blue_actions(actions)
+        if debug_timing:
+            timings["process_actions"] = time.perf_counter() - t0
 
         # Apply controls
+        if debug_timing:
+            t0 = time.perf_counter()
         self._apply_controls()
-
-        # # Run simulation for one MPC period
-        # for sim_substep in range(self.cfg.sim_steps_per_control):
+        if debug_timing:
+            timings["apply_controls"] = time.perf_counter() - t0
 
         # Step simulation
+        if debug_timing:
+            t0 = time.perf_counter()
         self.sim.step(n_steps=self.cfg.sim_steps_per_control)
+        if debug_timing:
+            timings["sim_step"] = time.perf_counter() - t0
 
         # Check collisions and update alive status
+        if debug_timing:
+            t0 = time.perf_counter()
         bb_collision, rr_collision, rb_collision, out_of_bounds = self._check_collisions()
+        if debug_timing:
+            timings["check_collisions"] = time.perf_counter() - t0
 
         # Save blue_alive BEFORE updating for reward computation
         # (agents that just died should still receive their death penalty)
         pre_collision_blue_alive = self.blue_alive
 
+        if debug_timing:
+            t0 = time.perf_counter()
         self._update_alive_status(bb_collision, rr_collision, rb_collision, out_of_bounds)
+        if debug_timing:
+            timings["update_alive"] = time.perf_counter() - t0
 
         # Batch termination event counts into single JAX sync
+        # Count per-agent collisions (not per-world) for accurate rate calculation
+        if debug_timing:
+            t0 = time.perf_counter()
         n_worlds = self.cfg.n_worlds
         term_counts = jnp.stack([
-            bb_collision.any(axis=1).sum(),
-            rr_collision.any(axis=1).sum(),
-            rb_collision.any(axis=1).sum(),
-            out_of_bounds.any(axis=1).sum(),
+            bb_collision.sum(),  # Total blue agents with BB collision
+            rr_collision.sum(),  # Total red agents with RR collision
+            rb_collision.sum() * 2,  # Total agents in RB collision (1 blue + 1 red each)
+            out_of_bounds.sum(),  # Total blue agents out of bounds
         ])
         term_counts_np = np.asarray(term_counts)
+        if debug_timing:
+            timings["term_counts_sync"] = time.perf_counter() - t0
         self.last_termination_events = {
             "bb_collision": float(term_counts_np[0]) / n_worlds,
             "rr_collision": float(term_counts_np[1]) / n_worlds,
@@ -1131,17 +1159,25 @@ class RedVsBlueEnv(gym.Env):
 
         # Compute rewards using pre-collision alive status
         # (so agents that just died receive their death penalty)
+        if debug_timing:
+            t0 = time.perf_counter()
         rewards = self._compute_rewards(
             bb_collision, rr_collision, rb_collision, out_of_bounds, pre_collision_blue_alive
         )
+        if debug_timing:
+            timings["compute_rewards"] = time.perf_counter() - t0
 
         # Update episode steps (per-world)
         self.episode_steps += 1
 
         # Check termination and truncation (compute alive once, reuse)
+        if debug_timing:
+            t0 = time.perf_counter()
         all_blue_dead = ~self.blue_alive.any(axis=1)
         all_red_dead = ~self.red_alive.any(axis=1)
         episode_terminated = np.asarray(all_blue_dead | all_red_dead)
+        if debug_timing:
+            timings["termination_sync"] = time.perf_counter() - t0
 
         # Per-agent termination: agent is terminated if dead OR episode ended
         # This is important for correct GAE computation in SKRL - dead agents
@@ -1174,16 +1210,37 @@ class RedVsBlueEnv(gym.Env):
 
         # Auto-reset worlds that are done (episode terminated or truncated)
         # Use episode_terminated (not per-agent terminated) for reset decision
+        if debug_timing:
+            t0 = time.perf_counter()
         done_mask = episode_terminated | truncated[sample_agent]
         if done_mask.any():
             self._reset_done_worlds(done_mask)
+        if debug_timing:
+            timings["reset_done_worlds"] = time.perf_counter() - t0
 
         # Get observations (after auto-reset so we return initial obs for reset worlds)
+        if debug_timing:
+            t0 = time.perf_counter()
         obs = self._get_observations()
+        if debug_timing:
+            timings["get_observations"] = time.perf_counter() - t0
+
+        if debug_timing:
+            t0 = time.perf_counter()
         info = self._get_info(
             bb_collision, rr_collision, rb_collision, out_of_bounds, rewards,
             pre_reset_blue_alive, pre_reset_red_alive, episode_terminated
         )
+        if debug_timing:
+            timings["get_info"] = time.perf_counter() - t0
+            timings["total"] = time.perf_counter() - t_start
+            # Print timing breakdown (every 10 steps to reduce noise but still be useful)
+            if not hasattr(self, "_debug_step_count"):
+                self._debug_step_count = 0
+            self._debug_step_count += 1
+            if self._debug_step_count % 10 == 0:
+                timing_str = " | ".join(f"{k}={v*1000:.2f}ms" for k, v in timings.items())
+                print(f"[Step {self._debug_step_count}] {timing_str}")
 
         return obs, rewards, terminated, truncated, info
 
@@ -1597,10 +1654,18 @@ class RedVsBlueEnv(gym.Env):
             from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
             self.sim.mj_model.vis.global_.offwidth = 1920
             self.sim.mj_model.vis.global_.offheight = 1080
+            # Camera config: distance=6m for wider view of the arena
+            cam_config = {
+                "distance": 6.0,
+                "azimuth": 90.0,
+                "elevation": -25.0,  # Consistent with eval script
+                "lookat": [0.0, 0.0, 1.0],  # Look at center of arena at 1m height
+            }
             self.sim.viewer = MujocoRenderer(
                 self.sim.mj_model,
                 self.sim.mj_data,
                 max_geom=self.sim.max_visual_geom,
+                default_cam_config=cam_config,
                 height=1080,
                 width=1920,
                 camera_id=-1,
