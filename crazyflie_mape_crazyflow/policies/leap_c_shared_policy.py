@@ -81,12 +81,15 @@ class LeapCMPCLayer(nn.Module):
         device: Union[str, torch.device] = "cuda",
         roll_pitch_max: float = 0.5,
         yaw_max: float = 0.1,
+        thrust_min: float = 1.23,
+        thrust_max: float = 3.68,
+        mass: Optional[float] = None,
+        gravity: Optional[float] = None,
         drone_model: str = "cf2x_L250",
         n_batch_max: int = 4096,
         num_threads: int = 8,
         velocity_max: Optional[float] = None,
         activation: str = "relu",
-        verbose: bool = True,
     ):
         """Initialize the MPC layer.
 
@@ -98,13 +101,16 @@ class LeapCMPCLayer(nn.Module):
             device: Computation device.
             roll_pitch_max: Maximum roll/pitch command in rad.
             yaw_max: Maximum yaw command in rad.
+            thrust_min: Minimum collective thrust [N].
+            thrust_max: Maximum collective thrust [N].
+            mass: Drone mass [kg]. None to load from drone_model.
+            gravity: Gravitational acceleration [m/s^2]. None to load from drone_model.
             drone_model: Drone model identifier.
             n_batch_max: Maximum batch size for parallel MPC solves.
             num_threads: Number of threads for parallel MPC solves.
             velocity_max: Maximum velocity constraint [m/s]. None to disable.
             activation: Hidden layer activation function name
                 (relu, tanh, elu, leaky_relu, gelu).
-            verbose: Whether to print acados build output.
         """
         super().__init__()
 
@@ -123,15 +129,17 @@ class LeapCMPCLayer(nn.Module):
             velocity_max=velocity_max,
             roll_pitch_max=roll_pitch_max,
             yaw_max=yaw_max,
-            verbose=verbose,
+            thrust_min=thrust_min,
+            thrust_max=thrust_max,
+            mass=mass,
+            gravity=gravity,
         )
         self.planner = QuadrotorPlanner(cfg=planner_cfg)
 
-        # Get physical parameters from planner's loaded drone params
-        self.mass = float(self.planner.drone_params["mass"])
-        self.gravity = float(np.abs(self.planner.drone_params["gravity_vec"][2]))
-        min_thrust = float(self.planner.drone_params["thrust_min"]) * 4  # Per motor -> collective
-        max_thrust = float(self.planner.drone_params["thrust_max"]) * 4
+        # Get physical parameters (use provided values or fall back to drone_params)
+        self.mass = mass if mass is not None else float(self.planner.drone_params["mass"])
+        self.gravity = gravity if gravity is not None else float(np.abs(self.planner.drone_params["gravity_vec"][2]))
+        self.cmd_f_coef = float(self.planner.drone_params["cmd_f_coef"])
 
 
         # Get parameter dimensions
@@ -149,10 +157,10 @@ class LeapCMPCLayer(nn.Module):
         # Action scaling for normalized output to match environment
         # Environment expects: roll/pitch in [-roll_pitch_max, roll_pitch_max]
         #                      yaw in [-yaw_max, yaw_max]
-        #                      thrust in [min_thrust, max_thrust]
+        #                      thrust in [thrust_min, thrust_max]
         # Normalized action = (raw - mean) / scale, where scale = (max - min) / 2
-        thrust_mean = (min_thrust + max_thrust) / 2.0
-        thrust_scale = (max_thrust - min_thrust) / 2.0
+        thrust_mean = (thrust_min + thrust_max) / 2.0
+        thrust_scale = (thrust_max - thrust_min) / 2.0
         self.register_buffer(
             'action_mean',
             torch.tensor([0.0, 0.0, 0.0, thrust_mean], dtype=torch.float32)
@@ -244,7 +252,7 @@ class LeapCMPCLayer(nn.Module):
         # p_nom = torch.cat((px, pu)) * torch.cat((self.state_scale, self.action_scale))
         # range_Q = 2.*q_nom
         # range_p = 2.*p_nom
-        range_p_t = 2 * 2 * self.control_penalty[-1] / 2 * self.mass * self.gravity
+        range_p_t = 2 * 2 * self.control_penalty[-1] / 2 * (self.mass * self.gravity) / self.cmd_f_coef
         epsilon = 0.01
 
         # Reshape to per-stage
@@ -301,12 +309,15 @@ class LeapCSharedGaussianPolicy(GaussianMixin, Model):
         state_indices: Optional[dict] = None,
         roll_pitch_max: float = 0.5,
         yaw_max: float = 0.1,
+        thrust_min: float = 1.23,
+        thrust_max: float = 3.68,
+        mass: Optional[float] = None,
+        gravity: Optional[float] = None,
         drone_model: str = "cf2x_L250",
         n_batch_max: int = 4096,
         num_threads: int = 8,
         velocity_max: Optional[float] = None,
         activation: str = "relu",
-        verbose: bool = True,
         **kwargs,
     ):
         """Initialize the policy.
@@ -327,15 +338,18 @@ class LeapCSharedGaussianPolicy(GaussianMixin, Model):
             state_indices: Dictionary mapping state components to observation indices.
             roll_pitch_max: Maximum roll/pitch command in rad.
             yaw_max: Maximum yaw command in rad.
+            thrust_min: Minimum collective thrust [N].
+            thrust_max: Maximum collective thrust [N].
+            mass: Drone mass [kg]. None to load from drone_model.
+            gravity: Gravitational acceleration [m/s^2]. None to load from drone_model.
             drone_model: Drone model identifier.
             n_batch_max: Maximum batch size for parallel MPC solves.
             num_threads: Number of threads for parallel MPC solves.
             velocity_max: Maximum velocity constraint [m/s]. None to disable.
             activation: Hidden layer activation function name
                 (relu, tanh, elu, leaky_relu, gelu).
-            verbose: Whether to print acados build output.
         """
-        Model.__init__(self, observation_space, action_space, device)
+        Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         GaussianMixin.__init__(
             self,
             clip_actions=clip_actions,
@@ -343,6 +357,11 @@ class LeapCSharedGaussianPolicy(GaussianMixin, Model):
             min_log_std=min_log_std,
             max_log_std=max_log_std,
         )
+
+        # Explicitly store GaussianMixin parameters to avoid nn.Module attribute issues
+        self._g_clip_log_std = clip_log_std
+        self._g_min_log_std = min_log_std
+        self._g_max_log_std = max_log_std
 
         self.mpc_horizon = mpc_horizon
         self.mpc_dt = mpc_dt
@@ -361,12 +380,15 @@ class LeapCSharedGaussianPolicy(GaussianMixin, Model):
             device=device,
             roll_pitch_max=roll_pitch_max,
             yaw_max=yaw_max,
+            thrust_min=thrust_min,
+            thrust_max=thrust_max,
+            mass=mass,
+            gravity=gravity,
             drone_model=drone_model,
             n_batch_max=n_batch_max,
             num_threads=num_threads,
             velocity_max=velocity_max,
             activation=activation,
-            verbose=verbose,
         )
 
         # Log std parameter - handle scalar or array input
@@ -408,17 +430,18 @@ class LeapCSharedGaussianPolicy(GaussianMixin, Model):
         self,
         inputs: Mapping[str, torch.Tensor],
         role: str = "",
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Mapping[str, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Mapping[str, torch.Tensor]]:
         """Compute actions from observations.
 
         Args:
-            inputs: Dictionary containing "states" observation tensor.
+            inputs: Dictionary containing observations (SKRL 2.0 format).
             role: Model role (unused).
 
         Returns:
-            Tuple of (actions, log_prob, outputs).
+            Tuple of (mean_actions, outputs_dict) where outputs_dict contains "log_std".
         """
-        obs = inputs["states"]
+        # SKRL 2.0: per-agent observations are under "observations" key
+        obs = inputs["observations"]
 
         # Convert to tensor if needed
         if not isinstance(obs, torch.Tensor):
@@ -433,13 +456,14 @@ class LeapCSharedGaussianPolicy(GaussianMixin, Model):
         # Get log std
         log_std = self.log_std_parameter
         if self._g_clip_log_std:
-            log_std = torch.clamp(log_std, self._g_log_std_min, self._g_log_std_max)
+            log_std = torch.clamp(log_std, self._g_min_log_std, self._g_max_log_std)
 
         # Store for distribution computation
         self._log_std = log_std
         self._num_samples = mean_actions.shape[0]
 
-        return mean_actions, log_std, {}
+        # SKRL 2.0: return (mean_actions, outputs_dict) with "log_std" in outputs
+        return mean_actions, {"log_std": log_std}
 
     def _extract_state(self, obs: torch.Tensor) -> torch.Tensor:
         """Extract MPC state from observation.

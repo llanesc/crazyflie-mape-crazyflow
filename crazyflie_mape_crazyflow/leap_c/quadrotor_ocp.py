@@ -84,6 +84,10 @@ def create_quadrotor_params(
     drone_model: str = "cf2x_L250",
     roll_pitch_max: float = 0.5,
     yaw_max: float = 0.5,
+    thrust_min: float | None = None,
+    thrust_max: float | None = None,
+    mass: float | None = None,
+    gravity: float | None = None,
 ) -> list[AcadosParameter]:
     """Create learnable parameters for quadrotor MPC with so_rpy Euler dynamics.
 
@@ -104,16 +108,26 @@ def create_quadrotor_params(
         drone_model: Drone model identifier for loading physical parameters.
         roll_pitch_max: Maximum roll/pitch command [rad].
         yaw_max: Maximum yaw command [rad].
+        thrust_min: Minimum collective thrust [N]. None to load from drone_model.
+        thrust_max: Maximum collective thrust [N]. None to load from drone_model.
+        mass: Drone mass [kg]. None to load from drone_model.
+        gravity: Gravitational acceleration [m/s^2]. None to load from drone_model.
 
     Returns:
         List of AcadosParameter objects.
     """
-    # Load physical parameters from drone-models
+    # Load physical parameters from drone-models (for fallback values)
     drone_params = load_params("so_rpy", drone_model)
-    mass = float(drone_params["mass"])
-    gravity = float(np.abs(drone_params["gravity_vec"][2]))
-    min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
-    max_thrust = float(drone_params["thrust_max"]) * 4
+    # Use provided values or fall back to drone_model values
+    if mass is None:
+        mass = float(drone_params["mass"])
+    if gravity is None:
+        gravity = float(np.abs(drone_params["gravity_vec"][2]))
+    if thrust_min is None:
+        thrust_min = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
+    if thrust_max is None:
+        thrust_max = float(drone_params["thrust_max"]) * 4
+    cmd_f_coef = float(drone_params["cmd_f_coef"])
 
     state_end_stages = list(range(N_horizon + 1)) if param_interface == "stagewise" else []
     ctrl_end_stages = list(range(N_horizon)) if param_interface == "stagewise" else []
@@ -132,9 +146,9 @@ def create_quadrotor_params(
     # Action mean and scale (computed from control bounds)
     # Roll/pitch: [-roll_pitch_max, roll_pitch_max] -> mean=0, scale=roll_pitch_max
     # Yaw: [-yaw_max, yaw_max] -> mean=0, scale=yaw_max
-    # Thrust: [min_thrust, max_thrust] -> mean=(min+max)/2, scale=(max-min)/2
-    thrust_mean = (min_thrust + max_thrust) / 2.0
-    thrust_scale = (max_thrust - min_thrust) / 2.0
+    # Thrust: [thrust_min, thrust_max] -> mean=(min+max)/2, scale=(max-min)/2
+    thrust_mean = (thrust_min + thrust_max) / 2.0
+    thrust_scale = (thrust_max - thrust_min) / 2.0
     action_mean = np.array([0.0, 0.0, 0.0, thrust_mean])
     action_scale = np.array([roll_pitch_max, roll_pitch_max, yaw_max, thrust_scale])
 
@@ -145,7 +159,8 @@ def create_quadrotor_params(
     p_nom = np.concatenate((px, pu)) * np.concatenate((state_scale, action_scale))
     range_Q = 2. * q_nom
     range_p = 2. * p_nom
-    range_p_t = 2 * range_Q[-1] / 2 * mass * gravity
+    # Hover thrust command = (mass * gravity) / cmd_f_coef in MPC dynamics
+    range_p_t = 2 * range_Q[-1] / 2 * (mass * gravity) / cmd_f_coef
     epsilon = 0.1
 
     q_state_low = np.full((Q_STATE_SIZE,), epsilon)
@@ -220,7 +235,12 @@ def get_learnable_param_dim(N_horizon: int, param_interface: QuadrotorAcadosPara
         return (Q_STATE_SIZE + P_X_SIZE) * n_state_stages + (Q_CTRL_SIZE + P_U_SIZE) * n_ctrl_stages
 
 
-def define_so_rpy_euler_dynamics(dt: float, drone_model: str = "cf2x_L250") -> tuple[ca.SX, ca.SX, ca.SX]:
+def define_so_rpy_euler_dynamics(
+    dt: float,
+    drone_model: str = "cf2x_L250",
+    mass: float | None = None,
+    gravity: float | None = None,
+) -> tuple[ca.SX, ca.SX, ca.SX]:
     """Define discrete quadrotor dynamics using so_rpy Euler model with SX symbols.
 
     Uses the fitted so_rpy Euler model which has linear second-order attitude dynamics
@@ -233,14 +253,18 @@ def define_so_rpy_euler_dynamics(dt: float, drone_model: str = "cf2x_L250") -> t
     Args:
         dt: Integration timestep [s].
         drone_model: Drone model identifier for parameter loading.
+        mass: Drone mass [kg]. None to load from drone_model.
+        gravity: Gravitational acceleration [m/s^2]. None to load from drone_model.
 
     Returns:
         Tuple of (x_next, x, u) CasADi SX expressions.
     """
     # Load drone parameters
     params = load_params("so_rpy", drone_model)
-    mass = float(params["mass"])
-    gravity = float(np.abs(params["gravity_vec"][2]))
+    if mass is None:
+        mass = float(params["mass"])
+    if gravity is None:
+        gravity = float(np.abs(params["gravity_vec"][2]))
     acc_coef = float(params["acc_coef"])
     cmd_f_coef = float(params["cmd_f_coef"])
     rpy_coef = np.array(params["rpy_coef"])
@@ -390,6 +414,10 @@ def export_parametric_ocp(
     velocity_max: float | None = None,
     roll_pitch_max: float = 0.5,
     yaw_max: float = 0.5,
+    thrust_min: float | None = None,
+    thrust_max: float | None = None,
+    mass: float | None = None,
+    gravity: float | None = None,
 ) -> AcadosOcp:
     """Export the quadrotor OCP for leap-c using so_rpy Euler dynamics.
 
@@ -403,6 +431,10 @@ def export_parametric_ocp(
         velocity_max: Maximum velocity per axis [m/s]. None to disable.
         roll_pitch_max: Maximum roll/pitch command [rad].
         yaw_max: Maximum yaw command [rad].
+        thrust_min: Minimum collective thrust [N]. None to load from drone_model.
+        thrust_max: Maximum collective thrust [N]. None to load from drone_model.
+        mass: Drone mass [kg]. None to load from drone_model.
+        gravity: Gravitational acceleration [m/s^2]. None to load from drone_model.
 
     Returns:
         Configured AcadosOcp object.
@@ -422,7 +454,7 @@ def export_parametric_ocp(
     ocp.dims.nu = NU
 
     # Get symbolic dynamics from so_rpy Euler model
-    x_next, x, u = define_so_rpy_euler_dynamics(dt, drone_model)
+    x_next, x, u = define_so_rpy_euler_dynamics(dt, drone_model, mass=mass, gravity=gravity)
 
     # Assign state and control symbols
     ocp.model.x = x
@@ -441,14 +473,17 @@ def export_parametric_ocp(
     # Initial state constraint (all zeros for Euler state)
     ocp.constraints.x0 = np.zeros(NX)
 
-    # Load physical parameters for thrust constraints
-    drone_params = load_params("so_rpy", drone_model)
-    min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
-    max_thrust = float(drone_params["thrust_max"]) * 4
+    # Load physical parameters for thrust constraints if not provided
+    if thrust_min is None or thrust_max is None:
+        drone_params = load_params("so_rpy", drone_model)
+        if thrust_min is None:
+            thrust_min = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
+        if thrust_max is None:
+            thrust_max = float(drone_params["thrust_max"]) * 4
 
     # Control box constraints
-    ocp.constraints.lbu = np.array([-roll_pitch_max, -roll_pitch_max, -yaw_max, min_thrust])
-    ocp.constraints.ubu = np.array([roll_pitch_max, roll_pitch_max, yaw_max, max_thrust])
+    ocp.constraints.lbu = np.array([-roll_pitch_max, -roll_pitch_max, -yaw_max, thrust_min])
+    ocp.constraints.ubu = np.array([roll_pitch_max, roll_pitch_max, yaw_max, thrust_max])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 
     # State box constraints (velocity)
@@ -472,7 +507,7 @@ def export_parametric_ocp(
     ocp.solver_options.qp_solver_ric_alg = 1
     ocp.solver_options.qp_solver_cond_N = N_horizon
     ocp.solver_options.qp_solver_warm_start = 1
-    
+
     ocp.solver_options.tol = 1e-6
     ocp.solver_options.qp_tol = 1e-6
     ocp.solver_options.qp_solver_iter_max = 20

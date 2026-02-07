@@ -43,22 +43,28 @@ class QuadrotorHoverInitializer(AcadosDiffMpcInitializer):
 
     For each problem instance, the state trajectory is initialized to the
     initial state broadcast across all stages, and the control trajectory
-    is initialized to hover [0, 0, 0, mass*gravity].
+    is initialized to hover [0, 0, 0, hover_thrust_cmd].
+
+    The hover thrust command accounts for the thrust coefficient from the
+    so_rpy model: thrust_cmd = (mass * gravity) / cmd_f_coef
     """
 
-    def __init__(self, ocp: AcadosOcp, mass: float, gravity: float):
+    def __init__(self, ocp: AcadosOcp, mass: float, gravity: float, cmd_f_coef: float):
         """Initialize with OCP and drone physical parameters.
 
         Args:
             ocp: The acados OCP for obtaining default iterate structure.
             mass: Drone mass [kg].
             gravity: Gravitational acceleration magnitude [m/s^2].
+            cmd_f_coef: Thrust command coefficient from so_rpy model.
         """
         self.default_iterate = ocp.create_default_initial_iterate().flatten()
         self.N = ocp.solver_options.N_horizon
         self.nx = ocp.dims.nx
         self.nu = ocp.dims.nu
-        self.hover_thrust = mass * gravity
+        # Hover thrust command: MPC dynamics use force = cmd_f_coef * cmd
+        # so to get force = mass * gravity, need cmd = (mass * gravity) / cmd_f_coef
+        self.hover_thrust = (mass * gravity) / cmd_f_coef
         self.hover_u = np.zeros(self.nu)
         self.hover_u[-1] = self.hover_thrust  # thrust is last element
 
@@ -138,7 +144,10 @@ class QuadrotorPlannerConfig:
         velocity_max: Maximum velocity magnitude [m/s]. None to disable constraint.
         roll_pitch_max: Maximum roll/pitch command [rad].
         yaw_max: Maximum yaw command [rad].
-        verbose: Whether to print acados build output.
+        thrust_min: Minimum collective thrust [N]. None to load from drone_model.
+        thrust_max: Maximum collective thrust [N]. None to load from drone_model.
+        mass: Drone mass [kg]. None to load from drone_model.
+        gravity: Gravitational acceleration [m/s^2]. None to load from drone_model.
     """
 
     N_horizon: int = 2
@@ -151,7 +160,10 @@ class QuadrotorPlannerConfig:
     velocity_max: float | None = None  # m/s, None to disable
     roll_pitch_max: float = 0.5
     yaw_max: float = 0.1
-    verbose: bool = True
+    thrust_min: float | None = None  # N, None to load from drone_model
+    thrust_max: float | None = None  # N, None to load from drone_model
+    mass: float | None = None  # kg, None to load from drone_model
+    gravity: float | None = None  # m/s^2, None to load from drone_model
     dtype: torch.dtype = torch.float32
 
     def __post_init__(self):
@@ -207,6 +219,10 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
                 drone_model=self.cfg.drone_model,
                 roll_pitch_max=self.cfg.roll_pitch_max,
                 yaw_max=self.cfg.yaw_max,
+                thrust_min=self.cfg.thrust_min,
+                thrust_max=self.cfg.thrust_max,
+                mass=self.cfg.mass,
+                gravity=self.cfg.gravity,
             )
             if params is None
             else params
@@ -229,12 +245,18 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             velocity_max=self.cfg.velocity_max,
             roll_pitch_max=self.cfg.roll_pitch_max,
             yaw_max=self.cfg.yaw_max,
+            thrust_min=self.cfg.thrust_min,
+            thrust_max=self.cfg.thrust_max,
+            mass=self.cfg.mass,
+            gravity=self.cfg.gravity,
         )
 
         # Create hover initializer for solver warm-start
-        mass = float(self.drone_params["mass"])
-        gravity = float(np.abs(self.drone_params["gravity_vec"][2]))
-        initializer = QuadrotorHoverInitializer(ocp, mass=mass, gravity=gravity)
+        # Use provided mass/gravity or fall back to drone_params
+        mass = self.cfg.mass if self.cfg.mass is not None else float(self.drone_params["mass"])
+        gravity = self.cfg.gravity if self.cfg.gravity is not None else float(np.abs(self.drone_params["gravity_vec"][2]))
+        cmd_f_coef = float(self.drone_params["cmd_f_coef"])
+        initializer = QuadrotorHoverInitializer(ocp, mass=mass, gravity=gravity, cmd_f_coef=cmd_f_coef)
 
         # Create differentiable MPC
         diff_mpc = AcadosDiffMpcTorch(
@@ -243,7 +265,6 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             export_directory=export_directory,
             n_batch_max=self.cfg.n_batch_max,
             num_threads_batch_solver=self.cfg.num_threads,
-            verbose=self.cfg.verbose,
             dtype=self.cfg.dtype,
         )
 
