@@ -118,9 +118,13 @@ def config_to_env_config(config: dict, device: str | None = None) -> RedVsBlueEn
     if "random_target_assignment" in env_cfg:
         kwargs["random_target_assignment"] = env_cfg["random_target_assignment"]
 
-    # Physical parameters (mass override)
-    if "mass" in env_cfg:
+    # Physical parameters (optional overrides)
+    if "mass" in env_cfg and env_cfg["mass"] is not None:
         kwargs["mass"] = env_cfg["mass"]
+    if "thrust_min" in env_cfg and env_cfg["thrust_min"] is not None:
+        kwargs["thrust_min"] = env_cfg["thrust_min"]
+    if "thrust_max" in env_cfg and env_cfg["thrust_max"] is not None:
+        kwargs["thrust_max"] = env_cfg["thrust_max"]
 
     # Domain randomization
     if "randomize_mass" in env_cfg:
@@ -163,6 +167,10 @@ def config_to_env_config(config: dict, device: str | None = None) -> RedVsBlueEn
         kwargs["reward_angle_coef"] = rewards_cfg["angle_coef"]
     if "velocity_coef" in rewards_cfg:
         kwargs["reward_velocity_coef"] = rewards_cfg["velocity_coef"]
+    if "ground_proximity_coef" in rewards_cfg:
+        kwargs["reward_ground_proximity_coef"] = rewards_cfg["ground_proximity_coef"]
+    if "ground_proximity_decay" in rewards_cfg:
+        kwargs["reward_ground_proximity_decay"] = rewards_cfg["ground_proximity_decay"]
     if "action_coef" in rewards_cfg:
         kwargs["reward_action_coef"] = rewards_cfg["action_coef"]
     if "action_smoothness_thrust" in rewards_cfg:

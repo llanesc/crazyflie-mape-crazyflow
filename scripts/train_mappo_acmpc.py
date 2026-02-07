@@ -11,7 +11,6 @@ Usage:
 import argparse
 import os
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -94,8 +93,8 @@ class TerminationLoggingWrapper:
         env,
         raw_env,
         log_interval: int = 100,
-        curriculum_manager: Optional[CurriculumManager] = None,
-        experiment_dir: Optional[Path] = None,
+        curriculum_manager: CurriculumManager | None = None,
+        experiment_dir: Path | None = None,
         # checkpoint_retention_interval: int = 500000,  # Disabled - using SKRL default checkpointing
         initial_timestep: int = 0,
     ):
@@ -105,7 +104,7 @@ class TerminationLoggingWrapper:
             env: Wrapped environment (SKRL PettingZoo wrapper).
             raw_env: Raw RedVsBlueEnv for accessing termination info directly.
             log_interval: Interval (in steps) for logging to TensorBoard.
-            curriculum_manager: Optional curriculum manager for progressive difficulty.
+            curriculum_manager: Optional curriculum manager for progressive training.
             experiment_dir: Directory for experiment outputs.
             initial_timestep: Starting timestep when resuming training.
         """
@@ -136,6 +135,9 @@ class TerminationLoggingWrapper:
 
     def _on_curriculum_level_change(self, level_idx: int, level_config: CurriculumLevel):
         """Handle curriculum level change by updating environment params."""
+        print(f"[DEBUG] Curriculum level change callback: level={level_idx}, name={level_config.name}")
+        print(f"[DEBUG] Level params: {level_config.params}")
+
         # Create spawn function if spawn config is provided
         spawn_fn = None
         if level_config.spawn:
@@ -146,6 +148,9 @@ class TerminationLoggingWrapper:
             spawn_fn=spawn_fn,
             **level_config.params,
         )
+        print(f"[DEBUG] After update: bb_tol={self._raw_env.cfg.bb_collision_tolerance}, "
+              f"rb_tol={self._raw_env.cfg.rb_collision_tolerance}, "
+              f"disturbance={self._raw_env.cfg.enable_disturbance}")
 
     def set_agent(self, agent):
         """Set the SKRL agent for logging."""
@@ -249,6 +254,14 @@ class TerminationLoggingWrapper:
             self._termination_counts["termination/red_win"] +
             self._termination_counts["termination/max_steps"]
         )
+
+        # DEBUG: Print termination counts
+        blue_wins = self._termination_counts["termination/blue_win"]
+        red_wins = self._termination_counts["termination/red_win"]
+        max_steps = self._termination_counts["termination/max_steps"]
+        blue_rate = blue_wins / total_terminations if total_terminations > 0 else 0.0
+        print(f"[DEBUG] Step {self._step_count}: blue_win={blue_wins:.0f}, red_win={red_wins:.0f}, max_steps={max_steps:.0f}, total={total_terminations:.0f}, blue_rate={blue_rate:.2%}")
+
         for key, count in self._termination_counts.items():
             self._agent.track_data(key, count)
             rate_key = key.replace("termination/", "termination_rate/")
@@ -277,14 +290,6 @@ class TerminationLoggingWrapper:
                 self._agent.track_data(f"reward/{name}", mean_return)
                 total_mean_return += mean_return
                 n_components += 1
-
-        # Save latest agent checkpoint
-        if self._experiment_dir is not None:
-            # Remove old best_agent file if it exists
-            for old_best in self._experiment_dir.glob("best_agent_*.pt"):
-                old_best.unlink()
-            best_agent_path = self._experiment_dir / f"best_agent_{self._step_count}.pt"
-            self._agent.save(str(best_agent_path))
 
         # Compute blue win rate and check for curriculum advancement
         if self._curriculum_manager is not None:
@@ -475,6 +480,26 @@ def main():
     env_cfg = config_to_env_config(config, device=device_str)
     spawn_fn = get_spawn_fn_from_config(config)
 
+    # Load curriculum configuration (if enabled)
+    curriculum_cfg = load_curriculum_config(config)
+    curriculum_manager = None
+    if curriculum_cfg is not None:
+        curriculum_manager = CurriculumManager(curriculum_cfg)
+        print(f"[Curriculum] Enabled with {len(curriculum_cfg.levels)} levels")
+        print(f"[Curriculum] Advance threshold: {curriculum_cfg.advance_threshold}")
+        print(f"[Curriculum] Window size: {curriculum_cfg.window_size}")
+        print(f"[Curriculum] Starting at level 0: {curriculum_cfg.levels[0].name}")
+
+        # Apply initial level params to environment config
+        initial_params = curriculum_manager.get_env_params()
+        for param_name, param_value in initial_params.items():
+            if param_name != "spawn" and hasattr(env_cfg, param_name):
+                setattr(env_cfg, param_name, param_value)
+
+        # Override spawn function if specified in initial level
+        if "spawn" in initial_params and initial_params["spawn"]:
+            spawn_fn = create_spawn_fn_from_config(initial_params["spawn"])
+
     # Set up results directory
     if args.resume_run is not None:
         # Check if it's just a run name or a full path
@@ -507,26 +532,6 @@ def main():
 
     print(f"Experiment: {args.experiment}")
     print(f"Results directory: {experiment_dir}")
-
-    # Load curriculum config if defined
-    curriculum_manager = None
-    curriculum_cfg = load_curriculum_config(config)
-    if curriculum_cfg is not None:
-        curriculum_manager = CurriculumManager(curriculum_cfg)
-        print(f"[Curriculum] Enabled with {len(curriculum_cfg.levels)} levels:")
-        for i, level in enumerate(curriculum_cfg.levels):
-            print(f"  Level {i}: {level.name} - params: {level.params}")
-        print(f"  Advance threshold: {curriculum_cfg.advance_threshold:.0%} blue wins over {curriculum_cfg.window_size} episodes")
-
-        # Apply initial level params to environment config
-        initial_params = curriculum_manager.get_env_params()
-        for param_name, param_value in initial_params.items():
-            if param_name != "spawn" and hasattr(env_cfg, param_name):
-                setattr(env_cfg, param_name, param_value)
-
-        # Override spawn function if specified in initial level
-        if "spawn" in initial_params and initial_params["spawn"]:
-            spawn_fn = create_spawn_fn_from_config(initial_params["spawn"])
 
     # Create environment first (needed for obs_dim in config)
     # Enable rendering if --render flag is set (SKRL 2.0 feature)
@@ -584,6 +589,8 @@ def main():
         },
         # Physical parameters
         "mass": env_cfg.mass,
+        "thrust_min": env_cfg.thrust_min,
+        "thrust_max": env_cfg.thrust_max,
         # Domain randomization
         "randomize_mass": env_cfg.randomize_mass,
         "randomize_inertia": env_cfg.randomize_inertia,
@@ -642,6 +649,8 @@ def main():
             "pursuer_proximity_decay": env_cfg.reward_pursuer_proximity_decay,
             "angle_coef": env_cfg.reward_angle_coef,
             "velocity_coef": env_cfg.reward_velocity_coef,
+            "ground_proximity_coef": env_cfg.reward_ground_proximity_coef,
+            "ground_proximity_decay": env_cfg.reward_ground_proximity_decay,
             "action_coef": env_cfg.reward_action_coef,
             "action_smoothness_thrust": env_cfg.reward_action_smoothness_thrust,
             "action_smoothness_rpy": env_cfg.reward_action_smoothness_rpy,
@@ -733,6 +742,10 @@ def main():
         hidden_dim=policy_cfg["cost_net_sizes"][0],
         roll_pitch_max=policy_cfg["roll_pitch_max"],
         yaw_max=policy_cfg["yaw_max"],
+        thrust_min=env_cfg.thrust_min,
+        thrust_max=env_cfg.thrust_max,
+        mass=env_cfg.mass,
+        gravity=env_cfg.gravity,
         drone_model=env_cfg.drone_model,
         n_batch_max=n_batch_max,
         initial_log_std=policy_cfg["initial_log_std"],

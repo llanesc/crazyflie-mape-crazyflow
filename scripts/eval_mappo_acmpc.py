@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Evaluation script for trained MAPPO models on Red vs Blue environment.
+"""Evaluation script for trained MAPPO ACMPC models on Red vs Blue environment.
 
-This script evaluates trained blue evader policies against scripted red pursuers.
+This script evaluates trained blue evader policies (ACMPC) against scripted red pursuers.
 """
 
 import argparse
@@ -25,6 +25,8 @@ if _device == "cpu":
 # For cuda, let JAX auto-detect
 
 import json
+import math
+import random
 import time
 from pathlib import Path
 
@@ -33,6 +35,7 @@ import imageio
 import mujoco
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from crazyflie_mape_crazyflow.envs import RedVsBlueEnv, RedVsBlueEnvConfig, RescaleActionWrapper
 from crazyflie_mape_crazyflow.envs.spawn import create_spawn_fn_from_config
@@ -70,6 +73,20 @@ def parse_step_string(step_str: str) -> int:
     else:
         # Plain integer
         return int(step_str)
+
+
+# Backwards compatibility mapping: old param names -> new param names
+# Old configs used "*_crash_tolerance" instead of "*_collision_tolerance"
+PARAM_NAME_ALIASES = {
+    "bb_crash_tolerance": "bb_collision_tolerance",
+    "rr_crash_tolerance": "rr_collision_tolerance",
+    "br_crash_tolerance": "rb_collision_tolerance",  # Note: also fixes br -> rb
+}
+
+
+def translate_param_name(name: str) -> str:
+    """Translate old parameter names to new ones for backwards compatibility."""
+    return PARAM_NAME_ALIASES.get(name, name)
 
 
 def find_checkpoints(search_dir: Path) -> list[Path]:
@@ -223,6 +240,12 @@ Example:
     # Curriculum level selection
     parser.add_argument("--level", type=int, default=None,
                         help="Curriculum level to evaluate on (0, 1, 2, ...). Uses spawn and params from that level.")
+    parser.add_argument("--no-domain-rand", action="store_true",
+                        help="Disable domain randomization (mass/inertia) regardless of level config")
+    parser.add_argument("--no-disturbance", action="store_true",
+                        help="Disable external force/torque disturbances regardless of level config")
+    parser.add_argument("--override-mass", type=float, default=None,
+                        help="Override simulation mass [kg] (policy still uses trained mass for model mismatch testing)")
 
     # Evaluation settings
     parser.add_argument("--n-episodes", type=int, default=100, help="Number of episodes to evaluate")
@@ -244,6 +267,17 @@ Example:
 
     # Output
     parser.add_argument("--output", type=str, default=None, help="Output JSON file for results")
+
+    # Reproducibility
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
+
+    # Debug
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print per-episode outcomes for debugging")
+
+    # Observation saving
+    parser.add_argument("--save-obs", action="store_true",
+                        help="Save observations to CSV files in {run_dir}/obs_data/ep{N:03d}_sim.csv")
 
     return parser.parse_args()
 
@@ -298,12 +332,13 @@ def load_configs(checkpoint_path: Path) -> tuple[dict, dict | None]:
 
     raise FileNotFoundError(
         f"Could not find environment_config.json or training_config.json in or above {checkpoint_path.parent}. "
-        "Make sure the checkpoint is in an experiment directory created by train_mappo.py."
+        "Make sure the checkpoint is in an experiment directory created by train_mappo_acmpc.py."
     )
 
 
 def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_fps=30, record_path=None,
-             cam_distance=8.0, cam_azimuth=90.0, cam_elevation=-25.0, cam_lookat=(0.0, 0.0, 1.0)):
+             cam_distance=8.0, cam_azimuth=90.0, cam_elevation=-25.0, cam_lookat=(0.0, 0.0, 1.0), verbose=False,
+             obs_save_dir=None):
     """Run evaluation episodes and collect metrics.
 
     Args:
@@ -318,6 +353,8 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
         cam_azimuth: Camera azimuth angle in degrees.
         cam_elevation: Camera elevation angle in degrees.
         cam_lookat: Camera lookat point (x, y, z).
+        verbose: Print per-episode outcomes for debugging.
+        obs_save_dir: Directory to save observation CSV files (None to disable).
 
     Returns:
         Dictionary of evaluation metrics.
@@ -337,7 +374,12 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     total_episodes_completed = 0
     blue_wins = 0
     red_wins = 0
-    out_of_bounds_count = 0
+
+    # Collision stats accumulators
+    total_bb_collision = 0
+    total_rr_collision = 0
+    total_rb_collision = 0
+    total_out_of_bounds = 0
 
     # Recording setup
     frames = [] if record_path else None
@@ -345,13 +387,17 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 
     episodes_completed = 0
     render_interval = max(1, env.cfg.control_freq // render_fps) if (render or recording) else None
-    # Time per render frame for real-time sync (in seconds)
-    # Use simulation time per frame for accurate real-time playback
-    sim_dt = 1.0 / env.cfg.control_freq  # Time per env step in simulation
-    render_dt = render_interval * sim_dt if render else None  # Sim time per rendered frame
+    sim_dt = 1.0 / env.cfg.control_freq
+    render_dt = render_interval * sim_dt if render else None
 
     # Camera settings to apply on first render
     camera_initialized = False
+
+    # Observation saving setup
+    if obs_save_dir is not None:
+        obs_save_dir = Path(obs_save_dir)
+        obs_save_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  Saving observations to: {obs_save_dir}")
 
     print(f"Running evaluation for {n_episodes} episodes...")
     if render:
@@ -361,268 +407,255 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     if render or recording:
         print(f"  Camera: distance={cam_distance}, azimuth={cam_azimuth}, elevation={cam_elevation}, lookat={cam_lookat}")
 
+    # Track per-world step counts and rewards (for accurate multi-world tracking)
+    world_steps = np.zeros(n_worlds, dtype=np.int32)
+    world_rewards = np.zeros(n_worlds, dtype=np.float32)
+
+    # Fair sampling: limit episodes per world to avoid bias toward shorter episodes
+    # With n_worlds parallel envs, each world should contribute ~equal episodes
+    episodes_per_world_limit = math.ceil(n_episodes / n_worlds)
+    world_episode_count = np.zeros(n_worlds, dtype=np.int32)
+
+    # Initial reset
+    obs_dict, info = env.reset()
+
+    # Print initial positions (world 0)
+    initial_pos = np.asarray(raw_env.sim.data.states.pos[0])
+    print(f"\n  Starting evaluation - Initial Positions (world 0):")
+    for i in range(n_blue):
+        pos = initial_pos[i]
+        print(f"    Blue {i}: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
+    for i in range(len(initial_pos) - n_blue):
+        pos = initial_pos[n_blue + i]
+        print(f"    Red  {i}: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
+
+    last_render_time = time.perf_counter() if render else None
+    global_step = 0
+
+    # Progress bar
+    pbar = tqdm(total=n_episodes, desc="Evaluating", unit="ep")
+
+    # Observation collection for saving (only for world 0 when n_worlds=1)
+    episode_observations = [] if obs_save_dir is not None else None
+    episode_times = [] if obs_save_dir is not None else None
+    current_episode_for_obs = 1
+
+    policy_time = 0.0
+    env_time = 0.0
+
     while episodes_completed < n_episodes:
-        # Reset environment
-        obs_dict, info = env.reset()
+        # Get actions from policy
+        actions = {}
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            for agent_name in env.possible_agents:
+                obs = obs_dict[agent_name]
+                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=policy.device)
 
-        # Get initial positions of all drones (world 0 for display/print)
-        initial_pos = np.asarray(raw_env.sim.data.states.pos[0])  # (n_drones, 3)
-        current_episode = episodes_completed + 1
+                action, outputs = policy.compute({"observations": obs_tensor}, role="")
+                log_std = outputs["log_std"]
+                if not deterministic:
+                    std = torch.exp(log_std)
+                    action = action + torch.randn_like(action) * std
 
-        # Print initial positions
-        print(f"\n  Episode {current_episode}/{n_episodes} - Initial Positions:")
-        for i in range(n_blue):
-            pos = initial_pos[i]
-            print(f"    Blue {i}: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
-        for i in range(len(initial_pos) - n_blue):
-            pos = initial_pos[n_blue + i]
-            print(f"    Red  {i}: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
+                actions[agent_name] = action.cpu().numpy()
 
-        episode_rewards = {agent: [] for agent in env.possible_agents}
-        step = 0
-        last_render_time = time.perf_counter() if render else None
+                if verbose and global_step == 0:
+                    print(f"    Step 0 - {agent_name}:")
+                    print(f"      Obs shape: {obs.shape}, Obs[0][:10]: {obs[0][:10] if len(obs.shape) > 1 else obs[:10]}")
+                    print(f"      Action (world 0): {actions[agent_name][0] if len(actions[agent_name].shape) > 1 else actions[agent_name]}")
+                    print(f"      log_std: {log_std.cpu().numpy()}")
+        policy_time += time.perf_counter() - t0
 
-        # Track cumulative termination events per world
-        episode_bb_collision = np.zeros(n_worlds)
-        episode_rb_collision = np.zeros(n_worlds)
-        episode_out_of_bounds = np.zeros(n_worlds)
+        # Collect observations for saving
+        if episode_observations is not None and n_worlds == 1:
+            step_obs = np.stack([obs_dict[agent][0] for agent in env.possible_agents], axis=0)
+            episode_observations.append(step_obs)
+            episode_times.append(world_steps[0] * sim_dt)
 
-        done = False
-        while not done:
-            # Get actions from policy
-            actions = {}
-            with torch.no_grad():
-                for agent_name in env.possible_agents:
-                    obs = obs_dict[agent_name]
-                    obs_tensor = torch.tensor(obs, dtype=torch.float32, device=policy.device)
+        # Step environment
+        t0 = time.perf_counter()
+        obs_dict, rewards, terminated, truncated, info = env.step(actions)
+        env_time += time.perf_counter() - t0
 
-                    # Get action from policy (SKRL 2.0 format)
-                    action, outputs = policy.compute({"observations": obs_tensor}, role="")
-                    log_std = outputs["log_std"]
-                    if not deterministic:
-                        # Sample from distribution using returned log_std
-                        std = torch.exp(log_std)
-                        action = action + torch.randn_like(action) * std
+        # Increment per-world step counts
+        world_steps += 1
+        global_step += 1
 
-                    actions[agent_name] = action.cpu().numpy()
-
-            # Step environment
-            obs_dict, rewards, terminated, truncated, info = env.step(actions)
-
-            # Accumulate rewards
-            for agent_name, reward in rewards.items():
-                episode_rewards[agent_name].append(reward)
-
-            # Accumulate termination events (rates are per-step, we want totals)
-            if "termination/bb_collision" in info:
-                episode_bb_collision += info["termination/bb_collision"] * n_worlds
-                episode_rb_collision += info["termination/rb_collision"] * n_worlds
-                episode_out_of_bounds += info["termination/out_of_bounds"] * n_worlds
-
-            # Check for done (any world terminated or truncated)
-            sample_agent = env.possible_agents[0]
-            done = terminated[sample_agent].any() or truncated[sample_agent].any()
-            step += 1
-
-            # Render/record if requested
-            if render_interval and (step % render_interval) == 0:
-                # Initialize camera on first render (need to render once to create viewer)
-                if not camera_initialized:
-                    env.render()  # Initialize viewer
-                    # Access camera through MujocoRenderer -> internal viewer -> cam
-                    if raw_env.sim.viewer is not None and raw_env.sim.viewer.viewer is not None:
-                        cam = raw_env.sim.viewer.viewer.cam
-                        cam.distance = cam_distance
-                        cam.azimuth = cam_azimuth
-                        cam.elevation = cam_elevation
-                        cam.lookat[:] = cam_lookat
-                    camera_initialized = True
-
-                # Add overlays (only for live rendering, not recording - overlays accumulate in rgb_array mode)
-                if render and not recording and raw_env.sim.viewer is not None and raw_env.sim.viewer.viewer is not None:
-                    viewer = raw_env.sim.viewer.viewer
-
-                    # Get velocities from sim state (world 0)
-                    vel = np.asarray(raw_env.sim.data.states.vel[0])  # (n_drones, 3)
-                    speeds = np.linalg.norm(vel, axis=-1)  # (n_drones,)
-
-                    # Get alive status (world 0)
-                    blue_alive = np.asarray(raw_env.blue_alive[0])  # (n_blue,)
-                    red_alive = np.asarray(raw_env.red_alive[0])  # (n_red,)
-
-                    # Win rates overlay
-                    if total_episodes_completed > 0:
-                        blue_win_rate = blue_wins / total_episodes_completed * 100
-                        red_win_rate = red_wins / total_episodes_completed * 100
-                        oob_rate = out_of_bounds_count / total_episodes_completed * 100
-                    else:
-                        blue_win_rate = red_win_rate = oob_rate = 0.0
-                    viewer.add_overlay(
-                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                        "Win Rates",
-                        f"Blue: {blue_win_rate:.1f}%  Red: {red_win_rate:.1f}%  OOB: {oob_rate:.1f}%"
-                    )
-                    viewer.add_overlay(
-                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                        "Episode",
-                        f"{current_episode}/{n_episodes}"
-                    )
-
-                    # Initial positions overlay
-                    blue_init_pos = [f"B{i}:({initial_pos[i][0]:+.2f},{initial_pos[i][1]:+.2f},{initial_pos[i][2]:+.2f})" for i in range(n_blue)]
-                    viewer.add_overlay(
-                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                        "Init Blue",
-                        " ".join(blue_init_pos)
-                    )
-                    n_red = len(initial_pos) - n_blue
-                    red_init_pos = [f"R{i}:({initial_pos[n_blue+i][0]:+.2f},{initial_pos[n_blue+i][1]:+.2f},{initial_pos[n_blue+i][2]:+.2f})" for i in range(n_red)]
-                    viewer.add_overlay(
-                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                        "Init Red",
-                        " ".join(red_init_pos)
-                    )
-
-                    # Blue agents status: velocity + alive/dead
-                    blue_status = []
-                    for i in range(n_blue):
-                        status = "●" if blue_alive[i] else "✗"
-                        blue_status.append(f"B{i}:{status} {speeds[i]:.2f}")
-                    viewer.add_overlay(
-                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                        "Blue [m/s]",
-                        "  ".join(blue_status)
-                    )
-
-                    # Red agents status: velocity + alive/dead
-                    red_status = []
-                    for i in range(len(red_alive)):
-                        status = "●" if red_alive[i] else "✗"
-                        red_status.append(f"R{i}:{status} {speeds[n_blue + i]:.2f}")
-                    viewer.add_overlay(
-                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                        "Red [m/s]",
-                        "  ".join(red_status)
-                    )
-
-                    # Red target assignments
-                    red_targets = np.asarray(raw_env.red_target[0])  # (n_red,)
-                    target_status = []
-                    for i in range(len(red_alive)):
-                        if red_alive[i]:
-                            target_status.append(f"R{i}→B{red_targets[i]}")
-                        else:
-                            target_status.append(f"R{i}→✗")
-                    viewer.add_overlay(
-                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                        "Targets",
-                        "  ".join(target_status)
-                    )
-
-                if recording:
-                    # Capture frame for recording
-                    frame = env.render()
-                    if frame is not None:
-                        # Add text overlay to frame
-                        frame = frame.copy()  # Make writable copy
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        font_scale = 0.5
-                        thickness = 1
-                        color = (255, 255, 255)  # White text
-                        bg_color = (0, 0, 0)  # Black background
-
-                        # Build overlay text
-                        lines = [
-                            f"Episode: {current_episode}/{n_episodes}",
-                            f"Step: {step}",
-                        ]
-                        # Add initial positions
-                        for i in range(n_blue):
-                            pos = initial_pos[i]
-                            lines.append(f"B{i} init: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
-                        n_red_drones = len(initial_pos) - n_blue
-                        for i in range(n_red_drones):
-                            pos = initial_pos[n_blue + i]
-                            lines.append(f"R{i} init: ({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f})")
-
-                        # Add target assignments
-                        red_targets = np.asarray(raw_env.red_target[0])  # (n_red,)
-                        red_alive = np.asarray(raw_env.red_alive[0])  # (n_red,)
-                        target_strs = []
-                        for i in range(n_red_drones):
-                            if red_alive[i]:
-                                target_strs.append(f"R{i}→B{red_targets[i]}")
-                            else:
-                                target_strs.append(f"R{i}→✗")
-                        lines.append(f"Targets: {' '.join(target_strs)}")
-
-                        # Draw text with background
-                        y_offset = 20
-                        for line in lines:
-                            (text_w, text_h), _ = cv2.getTextSize(line, font, font_scale, thickness)
-                            cv2.rectangle(frame, (5, y_offset - text_h - 2), (10 + text_w, y_offset + 4), bg_color, -1)
-                            cv2.putText(frame, line, (7, y_offset), font, font_scale, color, thickness, cv2.LINE_AA)
-                            y_offset += text_h + 8
-
-                        frames.append(frame)
-                if render:
-                    if not recording:
-                        env.render()
-                    # Sync to real-time
-                    current_time = time.perf_counter()
-                    elapsed = current_time - last_render_time
-                    sleep_time = render_dt - elapsed
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-                    last_render_time = time.perf_counter()
-
-        # Episode finished - collect metrics
-        # Determine termination reason for each world
-        # Note: info contains the state BEFORE auto-reset
-        max_steps = env.cfg.max_episode_steps
+        # Accumulate per-world rewards
         sample_agent = env.possible_agents[0]
+        for agent_name, reward in rewards.items():
+            world_rewards += reward  # reward is (n_worlds,) array
+
+        # Debug output after first step
+        if verbose and global_step == 1:
+            step_pos = np.asarray(raw_env.sim.data.states.pos[0])
+            step_vel = np.asarray(raw_env.sim.data.states.vel[0])
+            print(f"    After step 0:")
+            for i in range(n_blue):
+                print(f"      Blue {i} pos: {step_pos[i]}, vel: {step_vel[i]}, alive: {raw_env.blue_alive[0, i]}")
+            for i in range(len(step_pos) - n_blue):
+                print(f"      Red  {i} pos: {step_pos[n_blue + i]}, vel: {step_vel[n_blue + i]}, alive: {raw_env.red_alive[0, i]}")
+            print(f"      Boundary size: {env.cfg.boundary_size}, min_alt: {env.cfg.min_altitude}, max_alt: {env.cfg.max_altitude}")
+
+        # Accumulate collision events
+        if "termination/bb_collision" in info:
+            total_bb_collision += int(round(info["termination/bb_collision"] * n_worlds))
+            total_rr_collision += int(round(info["termination/rr_collision"] * n_worlds))
+            total_rb_collision += int(round(info["termination/rb_collision"] * n_worlds))
+            total_out_of_bounds += int(round(info["termination/out_of_bounds"] * n_worlds))
+
+        # Check which worlds finished this step
+        episode_done = info.get("episode_terminated", terminated[sample_agent])
+        world_done = episode_done | truncated[sample_agent]
 
         # Get final alive status (before auto-reset)
-        final_red_alive = info["red_alive"]  # (n_worlds, n_red)
-        final_blue_alive = info["blue_alive"]  # (n_worlds, n_blue)
+        final_red_alive = info["red_alive"]
+        final_blue_alive = info["blue_alive"]
 
-        for world_idx in range(min(n_worlds, n_episodes - episodes_completed)):
-            all_episode_lengths.append(step)
+        # Process finished worlds
+        for world_idx in range(n_worlds):
+            if not world_done[world_idx]:
+                continue
 
-            # Compute episode return
-            episode_return = sum(
-                sum(episode_rewards[agent][s][world_idx] for agent in env.possible_agents)
-                for s in range(len(episode_rewards[env.possible_agents[0]]))
-            )
-            all_rewards.append(episode_return)
+            if episodes_completed >= n_episodes:
+                break
 
-            # Determine termination reason and update win rate tracking
+            # Fair sampling: skip if this world has contributed enough episodes
+            # This prevents bias toward shorter episodes in multi-world evaluation
+            if world_episode_count[world_idx] >= episodes_per_world_limit:
+                # Still reset counters but don't record metrics
+                world_steps[world_idx] = 0
+                world_rewards[world_idx] = 0.0
+                continue
+
+            # Record this world's episode metrics
+            world_episode_count[world_idx] += 1
+            all_episode_lengths.append(int(world_steps[world_idx]))
+            all_rewards.append(float(world_rewards[world_idx]))
+
+            # Determine termination reason
             all_red_dead = not final_red_alive[world_idx].any()
             all_blue_dead = not final_blue_alive[world_idx].any()
+            is_truncated = truncated[sample_agent][world_idx]
 
-            if truncated[sample_agent][world_idx]:
-                reason = "survived"  # Reached max steps
-            elif all_red_dead and not all_blue_dead:
-                reason = "blue_won"  # All reds eliminated, blues survive
+            if all_red_dead and not all_blue_dead:
+                reason = "blue_won"
                 blue_wins += 1
-            elif episode_rb_collision[world_idx] > 0:
-                reason = "captured"  # Blue-red collision (blue captured)
+            elif all_blue_dead:
+                reason = "red_won"
                 red_wins += 1
-            elif episode_bb_collision[world_idx] > 0:
-                reason = "blue_crashed"  # Blue-blue collision
-                red_wins += 1
-            elif episode_out_of_bounds[world_idx] > 0:
-                reason = "out_of_bounds"  # Boundary violation
-                out_of_bounds_count += 1
-                red_wins += 1
+            elif is_truncated:
+                reason = "timeout"
             else:
                 reason = "unknown"
 
             all_termination_reasons.append(reason)
             total_episodes_completed += 1
+            episodes_completed += 1
+            pbar.update(1)
 
-        episodes_completed += n_worlds
-        print(f"  Completed {min(episodes_completed, n_episodes)}/{n_episodes} episodes")
+            # Update progress bar with win rates
+            if total_episodes_completed > 0:
+                pbar.set_postfix({
+                    'blue': f"{blue_wins/total_episodes_completed*100:.1f}%",
+                    'red': f"{red_wins/total_episodes_completed*100:.1f}%"
+                })
+
+            if verbose:
+                blue_alive_str = "".join(["B" if a else "." for a in final_blue_alive[world_idx]])
+                red_alive_str = "".join(["R" if a else "." for a in final_red_alive[world_idx]])
+                print(f"    Episode {episodes_completed}: {reason} | "
+                      f"steps={world_steps[world_idx]} | blue={blue_alive_str} red={red_alive_str} | "
+                      f"return={world_rewards[world_idx]:.2f}")
+
+            # Save observations if enabled and this is world 0
+            if episode_observations is not None and world_idx == 0 and len(episode_observations) > 0:
+                obs_array = np.stack(episode_observations, axis=0)
+                n_steps_obs, n_agents_obs, obs_dim = obs_array.shape
+                obs_flat = obs_array.reshape(n_steps_obs, n_agents_obs * obs_dim)
+                time_array = np.array(episode_times).reshape(-1, 1)
+                obs_with_time = np.hstack([time_array, obs_flat])
+
+                header_cols = ['time']
+                for agent_idx in range(n_agents_obs):
+                    for feat_idx in range(obs_dim):
+                        header_cols.append(f"agent{agent_idx}_obs{feat_idx}")
+
+                obs_file = obs_save_dir / f"ep{current_episode_for_obs:03d}_sim.csv"
+                np.savetxt(obs_file, obs_with_time, delimiter=",", header=",".join(header_cols), comments="")
+                print(f"  Saved observations to: {obs_file}")
+
+                episode_observations = []
+                episode_times = []
+                current_episode_for_obs += 1
+
+            # Reset this world's counters (environment auto-resets)
+            world_steps[world_idx] = 0
+            world_rewards[world_idx] = 0.0
+
+        # Render/record if requested
+        if render_interval and (global_step % render_interval) == 0:
+            if not camera_initialized:
+                env.render()
+                if raw_env.sim.viewer is not None and raw_env.sim.viewer.viewer is not None:
+                    cam = raw_env.sim.viewer.viewer.cam
+                    cam.distance = cam_distance
+                    cam.azimuth = cam_azimuth
+                    cam.elevation = cam_elevation
+                    cam.lookat[:] = cam_lookat
+                camera_initialized = True
+
+            if render and not recording and raw_env.sim.viewer is not None and raw_env.sim.viewer.viewer is not None:
+                viewer = raw_env.sim.viewer.viewer
+                vel = np.asarray(raw_env.sim.data.states.vel[0])
+                speeds = np.linalg.norm(vel, axis=-1)
+                blue_alive = np.asarray(raw_env.blue_alive[0])
+                red_alive = np.asarray(raw_env.red_alive[0])
+
+                if total_episodes_completed > 0:
+                    blue_win_rate = blue_wins / total_episodes_completed * 100
+                    red_win_rate = red_wins / total_episodes_completed * 100
+                else:
+                    blue_win_rate = red_win_rate = 0.0
+                viewer.add_overlay(mujoco.mjtGridPos.mjGRID_TOPLEFT, "Win Rates",
+                                   f"Blue: {blue_win_rate:.1f}%  Red: {red_win_rate:.1f}%")
+                viewer.add_overlay(mujoco.mjtGridPos.mjGRID_TOPLEFT, "Episodes",
+                                   f"{episodes_completed}/{n_episodes}")
+
+                blue_status = [f"B{i}:{'●' if blue_alive[i] else '✗'} {speeds[i]:.2f}" for i in range(n_blue)]
+                viewer.add_overlay(mujoco.mjtGridPos.mjGRID_TOPLEFT, "Blue [m/s]", "  ".join(blue_status))
+
+                red_status = [f"R{i}:{'●' if red_alive[i] else '✗'} {speeds[n_blue + i]:.2f}" for i in range(len(red_alive))]
+                viewer.add_overlay(mujoco.mjtGridPos.mjGRID_TOPLEFT, "Red [m/s]", "  ".join(red_status))
+
+            if recording:
+                frame = env.render()
+                if frame is not None:
+                    frame = frame.copy()
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    lines = [f"Episode: {episodes_completed}/{n_episodes}", f"Step: {global_step}"]
+                    y_offset = 20
+                    for line in lines:
+                        (text_w, text_h), _ = cv2.getTextSize(line, font, 0.5, 1)
+                        cv2.rectangle(frame, (5, y_offset - text_h - 2), (10 + text_w, y_offset + 4), (0, 0, 0), -1)
+                        cv2.putText(frame, line, (7, y_offset), font, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                        y_offset += text_h + 8
+                    frames.append(frame)
+
+            if render:
+                if not recording:
+                    env.render()
+                current_time = time.perf_counter()
+                elapsed = current_time - last_render_time
+                sleep_time = render_dt - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                last_render_time = time.perf_counter()
+
+    # Close progress bar and print final timing
+    pbar.close()
+    print(f"\n  Final timing: policy={policy_time*1000:.1f}ms, env={env_time*1000:.1f}ms, total_steps={global_step}")
 
     # Trim to exact number of episodes
     all_episode_lengths = all_episode_lengths[:n_episodes]
@@ -631,11 +664,9 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 
     # Compute termination reason counts
     reason_counts = {
-        "survived": sum(1 for r in all_termination_reasons if r == "survived"),
         "blue_won": sum(1 for r in all_termination_reasons if r == "blue_won"),
-        "captured": sum(1 for r in all_termination_reasons if r == "captured"),
-        "blue_crashed": sum(1 for r in all_termination_reasons if r == "blue_crashed"),
-        "out_of_bounds": sum(1 for r in all_termination_reasons if r == "out_of_bounds"),
+        "red_won": sum(1 for r in all_termination_reasons if r == "red_won"),
+        "timeout": sum(1 for r in all_termination_reasons if r == "timeout"),
         "unknown": sum(1 for r in all_termination_reasons if r == "unknown"),
     }
 
@@ -655,11 +686,21 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             "max": float(np.max(all_rewards)),
         },
         "termination_reasons": {
-            "survived": reason_counts["survived"] / n_episodes,
             "blue_won": reason_counts["blue_won"] / n_episodes,
-            "captured": reason_counts["captured"] / n_episodes,
-            "blue_crashed": reason_counts["blue_crashed"] / n_episodes,
-            "out_of_bounds": reason_counts["out_of_bounds"] / n_episodes,
+            "red_won": reason_counts["red_won"] / n_episodes,
+            "timeout": reason_counts["timeout"] / n_episodes,
+            "unknown": reason_counts["unknown"] / n_episodes,
+        },
+        "termination_counts": reason_counts,
+        "collision_stats": {
+            "bb_collision_total": int(total_bb_collision),
+            "rr_collision_total": int(total_rr_collision),
+            "rb_collision_total": int(total_rb_collision),
+            "out_of_bounds_total": int(total_out_of_bounds),
+            "bb_collision_per_episode": float(total_bb_collision / n_episodes),
+            "rr_collision_per_episode": float(total_rr_collision / n_episodes),
+            "rb_collision_per_episode": float(total_rb_collision / n_episodes),
+            "out_of_bounds_per_episode": float(total_out_of_bounds / n_episodes),
         },
     }
 
@@ -675,6 +716,17 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 def main():
     """Main evaluation function."""
     args = parse_args()
+
+    # Set random seeds for reproducibility
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        # JAX uses a functional random API, so we set the global key used by the env
+        # The env will use np.random internally for spawn randomization
+        print(f"Random seed: {args.seed}")
 
     # Resolve checkpoint path
     checkpoint_path = resolve_checkpoint(args.experiment, args.checkpoint, args.step)
@@ -706,7 +758,7 @@ def main():
     # Get control limits and mass from saved config
     roll_pitch_max = env_config.get("roll_pitch_max", 0.5)
     yaw_max = env_config.get("yaw_max", 0.5)
-    mass = env_config.get("mass", None)
+    mass = env_config.get("mass", 0.0406)
 
     print(f"Loading checkpoint from: {checkpoint_path}")
     print(f"Environment configuration:")
@@ -731,7 +783,6 @@ def main():
 
     # Create environment configuration from saved config
     # Use values from environment_config.json, with defaults for backwards compatibility
-    # Note: MPC settings are passed directly to the policy, not to env config
     env_cfg = RedVsBlueEnvConfig(
         n_pairs=n_pairs,
         n_worlds=args.n_worlds,
@@ -742,10 +793,10 @@ def main():
         control_freq=env_config.get("control_freq", 100),
         sim_freq=env_config.get("sim_freq", 500),
         mellinger_freq=env_config.get("mellinger_freq", 500),
-        # Crash tolerances
-        bb_collision_tolerance=env_config.get("bb_collision_tolerance", 0.2),
-        rr_collision_tolerance=env_config.get("rr_collision_tolerance", 0.2),
-        rb_collision_tolerance=env_config.get("rb_collision_tolerance", 0.2),
+        # Collision tolerances (try new names first, fall back to old names for backwards compat)
+        bb_collision_tolerance=env_config.get("bb_collision_tolerance", env_config.get("bb_crash_tolerance", 0.2)),
+        rr_collision_tolerance=env_config.get("rr_collision_tolerance", env_config.get("rr_crash_tolerance", 0.2)),
+        rb_collision_tolerance=env_config.get("rb_collision_tolerance", env_config.get("br_crash_tolerance", 0.2)),
         # Boundary settings
         boundary_size=env_config.get("boundary_size", 3.0),
         min_altitude=env_config.get("min_altitude", 0.1),
@@ -769,6 +820,15 @@ def main():
         mass=mass,  # None uses drone_model default
         # Target assignment
         random_target_assignment=env_config.get("random_target_assignment", False),
+        # Domain randomization (from top-level config, can be overridden by curriculum levels)
+        randomize_mass=env_config.get("randomize_mass", False),
+        randomize_inertia=env_config.get("randomize_inertia", False),
+        mass_randomization_std=env_config.get("mass_randomization_std", 0.003),
+        inertia_randomization_std=env_config.get("inertia_randomization_std", 3e-6),
+        # Disturbance forces/torques
+        enable_disturbance=env_config.get("enable_disturbance", False),
+        disturbance_force_std=env_config.get("disturbance_force_std", 0.01),
+        disturbance_torque_std=env_config.get("disturbance_torque_std", 1e-4),
         # Rewards (from learning_config if available, else defaults)
         reward_capture=learning_config.get("rewards", {}).get("capture", -30.0) if learning_config else -30.0,
         reward_escape=learning_config.get("rewards", {}).get("escape", 20.0) if learning_config else 20.0,
@@ -800,12 +860,32 @@ def main():
         level_name = level_config.get("name", f"Level {args.level}")
         print(f"\nUsing curriculum level {args.level}: {level_name}")
 
-        # Apply level params to env_cfg
-        level_params = level_config.get("params", {})
+        # Apply level params to env_cfg (with backwards compatibility for old param names)
+        # Handle both formats:
+        # - JSON format (environment_config.json): params nested under "params" key
+        # - YAML format (config.yaml): params at root level (all keys except name/level/spawn)
+        if "params" in level_config and isinstance(level_config["params"], dict):
+            level_params = level_config["params"]
+        else:
+            level_params = {k: v for k, v in level_config.items() if k not in ("name", "level", "spawn")}
+        has_old_names = False
         for param_name, param_value in level_params.items():
-            if hasattr(env_cfg, param_name):
-                setattr(env_cfg, param_name, param_value)
-                print(f"  {param_name}: {param_value}")
+            # Translate old param names to new ones
+            translated_name = translate_param_name(param_name)
+            if translated_name != param_name:
+                has_old_names = True
+
+            if hasattr(env_cfg, translated_name):
+                setattr(env_cfg, translated_name, param_value)
+                if translated_name != param_name:
+                    print(f"  {param_name} -> {translated_name}: {param_value}")
+                else:
+                    print(f"  {param_name}: {param_value}")
+            else:
+                print(f"  Warning: Unknown param '{param_name}' (translated: '{translated_name}'), skipping")
+
+        if has_old_names:
+            print("  Note: Config uses old parameter names (*_crash_tolerance), translated to new names (*_collision_tolerance)")
 
         # Use level's spawn config
         spawn_config = level_config.get("spawn", {})
@@ -816,17 +896,49 @@ def main():
     # Create spawn function from config
     spawn_fn = create_spawn_fn_from_config(spawn_config)
 
+    # Override domain randomization if requested (useful for testing)
+    if args.no_domain_rand:
+        env_cfg.randomize_mass = False
+        env_cfg.randomize_inertia = False
+        print("\n  ** Domain randomization DISABLED (--no-domain-rand) **")
+
+    # Override disturbances if requested (useful for testing)
+    if args.no_disturbance:
+        env_cfg.enable_disturbance = False
+        print("  ** Disturbances DISABLED (--no-disturbance) **")
+
+    # Override simulation mass if requested (for model mismatch testing)
+    if args.override_mass is not None:
+        original_mass = env_cfg.mass
+        env_cfg.mass = args.override_mass
+        print(f"  ** Simulation mass OVERRIDDEN: {original_mass:.4f} -> {args.override_mass:.4f} kg (policy uses {mass:.4f} kg) **")
+
+    # Print final configuration for diagnostic purposes
+    print(f"\nFinal environment configuration:")
+    print(f"  Collision tolerances: bb={env_cfg.bb_collision_tolerance}, rr={env_cfg.rr_collision_tolerance}, rb={env_cfg.rb_collision_tolerance}")
+    print(f"  Domain randomization: mass={env_cfg.randomize_mass}, inertia={env_cfg.randomize_inertia}")
+    if env_cfg.randomize_mass or env_cfg.randomize_inertia:
+        print(f"    mass_std={env_cfg.mass_randomization_std}, inertia_std={env_cfg.inertia_randomization_std}")
+    print(f"  Disturbances: enabled={env_cfg.enable_disturbance}")
+    if env_cfg.enable_disturbance:
+        print(f"    force_std={env_cfg.disturbance_force_std}, torque_std={env_cfg.disturbance_torque_std}")
+    print(f"  Boundary: size={env_cfg.boundary_size}, alt=[{env_cfg.min_altitude}, {env_cfg.max_altitude}]")
+
     # Validate recording settings and construct video path
     record_path = None
+    obs_save_dir = None
+
+    # Get run directory (for video and obs saving)
+    run_dir = checkpoint_path.parent
+    # Handle case where checkpoint is in a subdirectory (e.g., checkpoints/)
+    if run_dir.name == "checkpoints":
+        run_dir = run_dir.parent
+
     if args.record:
         if args.n_worlds != 1:
             raise ValueError("Recording requires --n-worlds 1")
 
         # Construct video path: {experiment}_{run}_level_{N}.mp4 in run directory
-        run_dir = checkpoint_path.parent
-        # Handle case where checkpoint is in a subdirectory (e.g., checkpoints/)
-        if run_dir.name == "checkpoints":
-            run_dir = run_dir.parent
         run_name = run_dir.name  # e.g., "run_20260121021742"
 
         if args.level is not None:
@@ -835,6 +947,12 @@ def main():
             video_filename = f"{args.experiment}_{run_name}.mp4"
 
         record_path = run_dir / video_filename
+
+    # Setup observation saving directory
+    if args.save_obs:
+        if args.n_worlds != 1:
+            raise ValueError("--save-obs requires --n-worlds 1")
+        obs_save_dir = run_dir / "obs_data"
 
     # Create environment
     # Use rgb_array mode for recording, human mode for live rendering
@@ -863,6 +981,7 @@ def main():
 
     # Create policy (same architecture as training)
     # Note: roll_pitch_max, yaw_max, and cost_net_activation were loaded earlier
+    # Use env_cfg thrust limits for consistency with environment's action space
     shared_policy = LeapCSharedGaussianPolicy(
         observation_space=sample_obs_space,
         action_space=sample_action_space,
@@ -870,12 +989,15 @@ def main():
         mpc_horizon=mpc_horizon,
         mpc_dt=mpc_dt,
         hidden_dim=hidden_dim,
-        roll_pitch_max=roll_pitch_max,
-        yaw_max=yaw_max,
+        roll_pitch_max=env_cfg.roll_pitch_max,
+        yaw_max=env_cfg.yaw_max,
+        thrust_min=env_cfg.thrust_min,
+        thrust_max=env_cfg.thrust_max,
+        mass=mass,
+        gravity=env_cfg.gravity,
         drone_model=drone_model,
         velocity_max=mpc_velocity_max,
         activation=cost_net_activation,
-        verbose=False,
     )
 
     # Load checkpoint
@@ -948,6 +1070,8 @@ def main():
         cam_azimuth=args.cam_azimuth,
         cam_elevation=args.cam_elevation,
         cam_lookat=tuple(args.cam_lookat),
+        verbose=args.verbose,
+        obs_save_dir=obs_save_dir,
     )
 
     # Print results
@@ -966,11 +1090,17 @@ def main():
     print(f"  Min:  {metrics['episode_return']['min']:.2f}")
     print(f"  Max:  {metrics['episode_return']['max']:.2f}")
     print(f"\nTermination Reasons:")
-    print(f"  Survived:      {metrics['termination_reasons']['survived']*100:.1f}%")
-    print(f"  Blue Won:      {metrics['termination_reasons']['blue_won']*100:.1f}%")
-    print(f"  Captured:      {metrics['termination_reasons']['captured']*100:.1f}%")
-    print(f"  Blue Crashed:  {metrics['termination_reasons']['blue_crashed']*100:.1f}%")
-    print(f"  Out of Bounds: {metrics['termination_reasons']['out_of_bounds']*100:.1f}%")
+    tc = metrics['termination_counts']
+    print(f"  Blue Won:  {tc['blue_won']:3d} ({metrics['termination_reasons']['blue_won']*100:.1f}%)")
+    print(f"  Red Won:   {tc['red_won']:3d} ({metrics['termination_reasons']['red_won']*100:.1f}%)")
+    print(f"  Timeout:   {tc['timeout']:3d} ({metrics['termination_reasons']['timeout']*100:.1f}%)")
+    if tc['unknown'] > 0:
+        print(f"  Unknown:   {tc['unknown']:3d} ({metrics['termination_reasons']['unknown']*100:.1f}%)  (bug - should be 0%)")
+    print(f"\nCollision Stats (total / per episode):")
+    print(f"  Blue-Blue Crashes:  {metrics['collision_stats']['bb_collision_total']} / {metrics['collision_stats']['bb_collision_per_episode']:.2f}")
+    print(f"  Red-Red Crashes:    {metrics['collision_stats']['rr_collision_total']} / {metrics['collision_stats']['rr_collision_per_episode']:.2f}")
+    print(f"  Blue-Red Crashes:   {metrics['collision_stats']['rb_collision_total']} / {metrics['collision_stats']['rb_collision_per_episode']:.2f}")
+    print(f"  Out of Bounds:      {metrics['collision_stats']['out_of_bounds_total']} / {metrics['collision_stats']['out_of_bounds_per_episode']:.2f}")
     print("=" * 60)
 
     # Save results to JSON if requested

@@ -12,10 +12,49 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
+from builtin_interfaces.msg import Duration
 from crazyflie_interfaces.msg import AttitudeSetpoint
+from crazyflie_interfaces.srv import NotifySetpointsStop, Takeoff
 from multiagent_pursuit_evasion_interfaces.msg import Status, EvaderState, PursuerState
+from multiagent_pursuit_evasion_interfaces.srv import ReadyForLowLevel
 from scipy.spatial.transform import Rotation
 from drone_models.core import load_params
+
+
+# =============================================================================
+# CONFIGURATION PARAMETERS - Edit these to change experiment setup
+# =============================================================================
+
+# Initial positions [x, y, z] for each drone after takeoff
+# Blue team (evaders)
+BLUE_INITIAL_POS = np.array([
+    [3.0, -0.5, 1.0],   # blue_1: [x, y, z]
+    [3.0, 0.5, 1.0],   # blue_2: [x, y, z]
+])
+
+# Red team (pursuers)
+RED_INITIAL_POS = np.array([
+    [-0.04, -0.27, 0.79],  # red_1: [x, y, z]
+    [0.19, 0.28, 1.33],  # red_2: [x, y, z]
+])
+
+# Takeoff transition thresholds
+ALTITUDE_THRESHOLD = 0.05   # m - how close to target altitude before switching to low-level
+VELOCITY_THRESHOLD = 0.05   # m/s - max velocity magnitude before switching to low-level
+TAKEOFF_DURATION = 3.0      # seconds for takeoff maneuver
+
+# Attitude limits
+ROLL_PITCH_MAX = 0.2  # rad (~11.5 deg)
+YAW_MAX = 0.1         # rad (~5.7 deg)
+
+# Inactive agent settling threshold
+SETTLING_VELOCITY_THRESHOLD = 0.2  # m/s - velocity below which to lock hover position
+
+# PID hover control parameters (integral for Z-axis only)
+HOVER_KI_Z = 6.0         # Integral gain for Z-axis hover
+HOVER_INTEGRAL_CAP = 1.0  # Cap on integral term (m*s) to prevent windup
+
+# =============================================================================
 
 
 def quat_to_euler(x: float, y: float, z: float, w: float) -> tuple:
@@ -54,42 +93,70 @@ class TeamBase(Node):
     thrust to PWM, and publishing attitude setpoints.
     """
 
-    def __init__(self, team_name: str, config: dict):
+    def __init__(self, node_name: str, team_type: str, config: dict):
         """Initialize team base.
 
         Args:
-            team_name: ROS node name.
+            node_name: ROS node name.
+            team_type: Team type for server notification ('evader' or 'pursuer').
             config: Environment configuration dictionary.
         """
-        super().__init__(team_name)
+        super().__init__(node_name)
 
         self.config = config
+        self.team_type = team_type  # 'evader' or 'pursuer' for server notification
 
         # Load physical parameters from drone-models
         drone_model = config.get('drone_model', 'cf2x_T350')
         drone_params = load_params("so_rpy", drone_model)
 
-        self.mass = float(drone_params["mass"]) + 4.9 / 1000.0
+        self.mass = config.get('mass', 0.0406)
         self.gravity = float(np.abs(drone_params["gravity_vec"][2]))
-        self.min_thrust = self.mass * self.gravity * 0.5
-        self.max_thrust = self.mass * self.gravity * 1.5
+        self.thrust_min_hw = float(np.abs(drone_params["thrust_min"])) * 4  # Per motor -> collective
+        self.thrust_max_hw = float(np.abs(drone_params["thrust_max"])) * 4  # Per motor -> collective
+        # Use config values if provided, otherwise compute from mass/gravity
+        self.thrust_min = config.get('thrust_min', self.mass * self.gravity * 0.5)
+        self.thrust_max = config.get('thrust_max', self.mass * self.gravity * 1.5)
 
-        self.blue_initial_height = [1.0, 1.0]
-        # self.red_initial_height = [0.67, 0.80]
-        self.red_initial_height = [1.19, 1.04]
+        # Use global configuration for initial positions
+        self.blue_initial_pos = BLUE_INITIAL_POS.copy()
+        self.red_initial_pos = RED_INITIAL_POS.copy()
 
-        # Attitude limits
-        self.roll_pitch_max = config.get('roll_pitch_max', 0.5)  # rad
-        self.yaw_max = config.get('yaw_max', 0.1)  # rad
+        # Heights for takeoff command (high-level commander uses these)
+        self.blue_initial_height = self.blue_initial_pos[:, 2].tolist()
+        self.red_initial_height = self.red_initial_pos[:, 2].tolist()
+
+        # Attitude limits from global config
+        self.roll_pitch_max = config.get('roll_pitch_max', ROLL_PITCH_MAX)
+        self.yaw_max = config.get('yaw_max', YAW_MAX)
 
         # Thrust-to-PWM parameters (linear mapping matching Mellinger controller)
         self.pwm_max = 65535
+        self.pwm_min = 7000
 
         self.team_size = None
         self.cf_list = []
         self.attitude_setpoint_publishers = None
         self.team_initialized = False
         self.initialized_control = False
+
+        # Takeoff and low-level control state from global config
+        self.takeoff_commanded = False
+        self.low_level_enabled = False
+        self.altitude_threshold = ALTITUDE_THRESHOLD
+        self.velocity_threshold = VELOCITY_THRESHOLD
+        self.takeoff_duration_sec = TAKEOFF_DURATION
+
+        # Settling state for inactive agents (initialized in initialize_team)
+        self.settling_velocity_threshold = SETTLING_VELOCITY_THRESHOLD
+        self.agent_settled = None  # Bool array: True if agent has settled (velocity below threshold)
+        self.settled_pos = None    # Position where agent settled
+
+        # PID hover control state (Z-axis integral)
+        self.hover_ki_z = HOVER_KI_Z
+        self.hover_integral_cap = HOVER_INTEGRAL_CAP
+        self.z_error_integral = None  # Accumulated Z position error integral
+        self.last_control_time = None  # For computing dt
 
     def initialize_team(self, cf_list: list):
         """Initialize team with CF names and create publishers.
@@ -107,6 +174,108 @@ class TeamBase(Node):
                 10
             ) for cf in cf_list
         ]
+
+        # Initialize settling state tracking for inactive agents
+        self.agent_settled = np.zeros(self.team_size, dtype=bool)
+        self.settled_pos = np.zeros((self.team_size, 3))
+
+        # Initialize PID hover integral state
+        self.z_error_integral = np.zeros(self.team_size)
+        self.last_control_time = None
+
+    def command_takeoff(self, target_heights: list):
+        """Command takeoff for all drones to their target heights.
+
+        Args:
+            target_heights: List of target heights for each drone.
+        """
+        if self.takeoff_commanded:
+            return
+
+        for i, cf in enumerate(self.cf_list):
+            height = target_heights[i] if i < len(target_heights) else target_heights[-1]
+            client = self.create_client(Takeoff, f'/{cf}/takeoff')
+            if client.wait_for_service(timeout_sec=1.0):
+                request = Takeoff.Request()
+                request.group_mask = 0
+                request.height = float(height)
+                request.duration = Duration(sec=int(self.takeoff_duration_sec),
+                                            nanosec=int((self.takeoff_duration_sec % 1) * 1e9))
+                future = client.call_async(request)
+                self.get_logger().info(f'Commanded takeoff for {cf} to height {height:.2f}m')
+            else:
+                self.get_logger().warn(f'Takeoff service not available for {cf}')
+
+        self.takeoff_commanded = True
+
+    def check_ready_for_low_level(self, states: np.ndarray, target_heights: list) -> bool:
+        """Check if all drones have reached altitude and are stable.
+
+        Args:
+            states: Current states array (n_drones, 10) with [pos, vel, rpy, active].
+            target_heights: Target heights for each drone.
+
+        Returns:
+            True if all drones are ready for low-level control.
+        """
+        if self.low_level_enabled:
+            return True
+
+        for i in range(len(self.cf_list)):
+            height = target_heights[i] if i < len(target_heights) else target_heights[-1]
+            current_z = states[i, 2]
+            velocity = states[i, 3:6]
+            vel_magnitude = np.linalg.norm(velocity)
+
+            altitude_error = abs(current_z - height)
+            if altitude_error > self.altitude_threshold:
+                return False
+            if vel_magnitude > self.velocity_threshold:
+                return False
+
+        return True
+
+    def switch_to_low_level(self):
+        """Switch all drones from high-level to low-level attitude control."""
+        if self.low_level_enabled:
+            return
+
+        for i, cf in enumerate(self.cf_list):
+            client = self.create_client(NotifySetpointsStop, f'/{cf}/notify_setpoints_stop')
+            if client.wait_for_service(timeout_sec=1.0):
+                request = NotifySetpointsStop.Request()
+                request.remain_valid_millisecs = 0
+                future = client.call_async(request)
+                self.get_logger().info(f'Switched {cf} to low-level control')
+
+                # Send zero attitude setpoint immediately after switching
+                # This is required before streaming actual setpoints
+                zero_setpoint = AttitudeSetpoint()
+                zero_setpoint.roll = 0.0
+                zero_setpoint.pitch = 0.0
+                zero_setpoint.yaw_rate = 0.0
+                zero_setpoint.thrust = 0
+                self.attitude_setpoint_publishers[i].publish(zero_setpoint)
+                self.get_logger().info(f'Sent zero setpoint to {cf}')
+            else:
+                self.get_logger().warn(f'notify_setpoints_stop service not available for {cf}')
+
+        self.low_level_enabled = True
+        self.get_logger().info('All drones switched to low-level attitude control')
+
+        # Notify server that this team is ready for low-level control
+        self._notify_server_ready()
+
+    def _notify_server_ready(self):
+        """Notify server that this team is ready for low-level control."""
+        client = self.create_client(ReadyForLowLevel, '/ready_for_low_level')
+        if client.wait_for_service(timeout_sec=1.0):
+            request = ReadyForLowLevel.Request()
+            request.team_name = self.team_type
+            future = client.call_async(request)
+            self.get_logger().info(f'Notified server that {self.team_type} team is ready')
+        else:
+            self.get_logger().warn('ready_for_low_level service not available')
 
     def cmd_attitude_setpoint(self, control: np.ndarray, index: int):
         """Publish attitude setpoint command.
@@ -139,12 +308,12 @@ class TeamBase(Node):
             PWM value [0, 65535].
         """
         # Clamp thrust to valid range
-        collective_thrust = np.clip(collective_thrust, 0, self.max_thrust)
+        collective_thrust = np.clip(collective_thrust, self.thrust_min, self.thrust_max)
 
         # Linear mapping: pwm = (thrust / thrust_max) * pwm_max
-        pwm = (collective_thrust / self.max_thrust) * self.pwm_max
+        pwm = (collective_thrust / self.thrust_max_hw) * self.pwm_max
 
-        return int(np.clip(pwm, 0, self.pwm_max))
+        return int(np.clip(pwm, self.pwm_min, self.pwm_max))
 
     def states_to_np(self, states: list) -> np.ndarray:
         """Convert PursuerState list to numpy array (10D).
@@ -241,7 +410,7 @@ class TeamBase(Node):
 
 
 class PursuerTeam(TeamBase):
-    """Red team (pursuers) using Pure Pursuit, ProNav, or Augmented ProNav.
+    """Red team (pursuers) using Pure Pursuit, ProNav, Augmented ProNav, or TPN.
 
     Control logic matches the simulation environment's pursuer strategies.
     """
@@ -252,7 +421,7 @@ class PursuerTeam(TeamBase):
         Args:
             config: Environment configuration dictionary.
         """
-        super().__init__('pursuer_team', config)
+        super().__init__('pursuer_team', 'pursuer', config)
 
         self.pursuer_targets = []
         self.initial_pos = None
@@ -296,9 +465,8 @@ class PursuerTeam(TeamBase):
         """Handle status message and compute control."""
         if not self.team_initialized:
             self.initialize_team(msg.pursuer_cf_names)
-            initial_pos = self.states_to_np(msg.cf_pursuer_states)[:, 0:3]
-            initial_pos[:, 2] = self.red_initial_height  # Set initial hover height
-            self.initial_pos = initial_pos
+            # Use full XYZ initial positions from config
+            self.initial_pos = self.red_initial_pos.copy()
 
         self.pursuer_targets = list(msg.pursuer_targets)
         blue_states = msg.cf_evader_states
@@ -306,6 +474,22 @@ class PursuerTeam(TeamBase):
         status = msg.status
 
         if status == Status.MAPE_STATUS_OFF:
+            return
+
+        # Command takeoff when in TAKEOFF status
+        if status == Status.MAPE_STATUS_TAKEOFF and not self.takeoff_commanded:
+            self.command_takeoff(self.red_initial_height)
+            return
+
+        # Check if ready to switch to low-level control during TAKEOFF
+        if status == Status.MAPE_STATUS_TAKEOFF and not self.low_level_enabled:
+            red_states_np = self.states_to_np(red_states)
+            if self.check_ready_for_low_level(red_states_np, self.red_initial_height):
+                self.switch_to_low_level()
+            return  # Don't send attitude commands until switched
+
+        # Only send attitude commands if low-level control is enabled
+        if not self.low_level_enabled:
             return
 
         if not self.initialized_control:
@@ -335,9 +519,9 @@ class PursuerTeam(TeamBase):
         if status == Status.MAPE_STATUS_OFF:
             return np.zeros((red_states_np.shape[0], 4))
 
-        elif status == Status.MAPE_STATUS_INITIALIZED:
-            # Hover at initial position
-            return self._pd_control(red_states_np, self.initial_pos, np.zeros_like(self.initial_pos))
+        elif status == Status.MAPE_STATUS_TAKEOFF or status == Status.MAPE_STATUS_INITIALIZED:
+            # Hover at initial position (TAKEOFF included for brief transition period)
+            return self._pid_control(red_states_np, self.initial_pos, np.zeros_like(self.initial_pos))
 
         elif status == Status.MAPE_STATUS_RUNNING:
             # Get target positions and velocities
@@ -345,29 +529,54 @@ class PursuerTeam(TeamBase):
             target_vel = blue_states_np[self.pursuer_targets, 3:6].copy()
 
             active_agents = (red_states_np[:, -1] == 1)
+            inactive_agents = ~active_agents
+
+            # Reset settled state and integral for agents that become active again
+            self.agent_settled[active_agents] = False
+            # Reset integral for active agents (using pursuit control, not PID)
+            self.z_error_integral[active_agents] = 0.0
 
             # Update initial pos for active agents (for deactivated hover reference)
             self.initial_pos[active_agents] = red_states_np[active_agents, 0:3].copy()
-
-            # For inactive agents, hover slightly above last position
-            target_pos[~active_agents] = self.initial_pos[~active_agents]
-            target_pos[~active_agents, 2] += 0.1
-            target_vel[~active_agents] = 0.
 
             controls = np.zeros((self.team_size, 4))
 
             # Get blue acceleration for ProNav feedforward (measured from accel topic)
             blue_accel = self.get_acceleration(blue_states)
             target_accel = blue_accel[self.pursuer_targets, :].copy()
-            target_accel[~active_agents] = 0.
+            target_accel[inactive_agents] = 0.
 
-            if np.any(~active_agents):
-                controls_inactive = self._pd_control(
-                    red_states_np[~active_agents, :],
-                    target_pos[~active_agents],
-                    np.zeros_like(target_pos[~active_agents])
+            # Handle inactive agents with settling behavior
+            if np.any(inactive_agents):
+                inactive_indices = np.where(inactive_agents)[0]
+                inactive_pos = red_states_np[inactive_agents, 0:3]
+                inactive_vel = red_states_np[inactive_agents, 3:6]
+                inactive_vel_mag = np.linalg.norm(inactive_vel, axis=1)
+
+                # Check which inactive agents have settled (velocity below threshold)
+                for i, idx in enumerate(inactive_indices):
+                    if not self.agent_settled[idx] and inactive_vel_mag[i] < self.settling_velocity_threshold:
+                        self.agent_settled[idx] = True
+                        self.settled_pos[idx] = inactive_pos[i]
+                        self.get_logger().info(f'RED {idx} settled at pos {self.settled_pos[idx]}')
+
+                # Build target positions for inactive agents
+                inactive_target_pos = np.zeros_like(inactive_pos)
+                for i, idx in enumerate(inactive_indices):
+                    if self.agent_settled[idx]:
+                        # Use settled position for hover
+                        inactive_target_pos[i] = self.settled_pos[idx]
+                    else:
+                        # Use current position to slow down
+                        inactive_target_pos[i] = inactive_pos[i]
+
+                controls_inactive = self._pid_control(
+                    red_states_np[inactive_agents, :],
+                    inactive_target_pos,
+                    np.zeros_like(inactive_target_pos),
+                    agent_indices=inactive_indices
                 )
-                controls[~active_agents, :] = controls_inactive
+                controls[inactive_agents, :] = controls_inactive
 
             if np.any(active_agents):
                 if self.pursuer_strategy == "PP":
@@ -383,6 +592,12 @@ class PursuerTeam(TeamBase):
                         target_vel[active_agents],
                         target_accel[active_agents]
                     )
+                elif self.pursuer_strategy == "TPN":
+                    controls_active = self._tpn_control(
+                        red_states_np[active_agents, :],
+                        target_pos[active_agents],
+                        target_vel[active_agents]
+                    )
                 else:  # ProNav (default)
                     controls_active = self._pronav_control(
                         red_states_np[active_agents, :],
@@ -393,6 +608,21 @@ class PursuerTeam(TeamBase):
                 controls[active_agents, :] = controls_active
 
             return controls
+
+        elif status == Status.MAPE_STATUS_BLUE_WON or status == Status.MAPE_STATUS_RED_WON:
+            # Game over - hover at current/settled position
+            hover_pos = np.zeros_like(red_states_np[:, 0:3])
+            for i in range(self.team_size):
+                if self.agent_settled[i]:
+                    hover_pos[i] = self.settled_pos[i]
+                else:
+                    hover_pos[i] = red_states_np[i, 0:3]
+                    # Mark as settled if not already
+                    vel_mag = np.linalg.norm(red_states_np[i, 3:6])
+                    if vel_mag < self.settling_velocity_threshold:
+                        self.agent_settled[i] = True
+                        self.settled_pos[i] = red_states_np[i, 0:3]
+            return self._pid_control(red_states_np, hover_pos, np.zeros_like(hover_pos))
 
         return np.zeros((len(red_states), 4))
 
@@ -494,6 +724,44 @@ class PursuerTeam(TeamBase):
         accel_pp = self._pure_pursuit(pos_rb, vel_rb)
 
         accel = np.where(use_pure_pursuit[:, None], accel_pp, accel_pronav)
+
+        return accel
+
+    def _tpn_with_axial(self, pos_rb: np.ndarray, vel_rb: np.ndarray,
+                        vel_pursuer: np.ndarray) -> np.ndarray:
+        """True Proportional Navigation with axial speed floor matching env.
+
+        Uses TPN (||vel_rb|| instead of Vc for stability) with axial speed floor.
+        Unlike AugProNav:
+        - Does NOT fall back to pure pursuit (always uses TPN)
+        - Does NOT use target acceleration feedforward
+        - Uses ||vel_rb|| instead of Vc for more stable behavior
+
+        Args:
+            pos_rb: Relative position (target - pursuer), shape (n, 3).
+            vel_rb: Relative velocity (target - pursuer), shape (n, 3).
+            vel_pursuer: Pursuer velocity, shape (n, 3).
+
+        Returns:
+            Acceleration command, shape (n, 3).
+        """
+        dist = norm(pos_rb, axis=-1, keepdims=True) + 1e-6
+        u_r = pos_rb / dist  # LOS unit vector
+        omega = np.cross(pos_rb, vel_rb) / (dist ** 2)
+
+        # Lateral (Steering) - uses ||vel_rb|| instead of Vc for TPN
+        vel_rb_norm = norm(vel_rb, axis=-1, keepdims=True)
+        a_lat = self.N_gain * vel_rb_norm * np.cross(omega, u_r)
+
+        # Axial (Speed Floor) - only accelerate if below V_min
+        # Use signed dot product: positive when closing, negative when moving away
+        pursuer_speed = np.sum(vel_pursuer * u_r, axis=-1, keepdims=True)
+        a_axial_mag = np.maximum(0.0, self.K_v * (self.V_min - pursuer_speed))
+        a_axial = a_axial_mag * u_r
+
+        # TPN acceleration with gravity compensation
+        accel = a_lat + a_axial
+        accel[:, 2] += self.gravity
 
         return accel
 
@@ -602,12 +870,12 @@ class PursuerTeam(TeamBase):
 
         return self._clip_and_pack(rpy_des, thrust_des)
 
-    def _pd_control(self, states: np.ndarray, target_pos: np.ndarray,
-                    target_vel: np.ndarray) -> np.ndarray:
-        """PD position control for hover.
+    def _tpn_control(self, states: np.ndarray, target_pos: np.ndarray,
+                     target_vel: np.ndarray) -> np.ndarray:
+        """True Proportional Navigation control.
 
         Args:
-            states: Agent states [pos, vel, rpy, active], shape (n, 10).
+            states: Pursuer states [pos, vel, rpy, active], shape (n, 10).
             target_pos: Target positions, shape (n, 3).
             target_vel: Target velocities, shape (n, 3).
 
@@ -616,8 +884,65 @@ class PursuerTeam(TeamBase):
         """
         pos_rb = target_pos - states[:, 0:3]
         vel_rb = target_vel - states[:, 3:6]
+        vel_pursuer = states[:, 3:6]
 
+        accel = self._tpn_with_axial(pos_rb, vel_rb, vel_pursuer)
+        rpy_des, thrust_des = self._accel_to_attitude(accel, states[:, 6:9])
+
+        return self._clip_and_pack(rpy_des, thrust_des)
+
+    def _pid_control(self, states: np.ndarray, target_pos: np.ndarray,
+                     target_vel: np.ndarray, agent_indices: np.ndarray = None) -> np.ndarray:
+        """PID position control for hover.
+
+        Uses PD control for XY axes and PID control for Z axis to eliminate
+        steady-state error in altitude hover.
+
+        Args:
+            states: Agent states [pos, vel, rpy, active], shape (n, 10).
+            target_pos: Target positions, shape (n, 3).
+            target_vel: Target velocities, shape (n, 3).
+            agent_indices: Optional indices of agents being controlled. If None,
+                assumes all agents [0, 1, ..., n-1]. Required when controlling
+                a subset of agents to correctly update per-agent integral state.
+
+        Returns:
+            Control array [roll, pitch, yaw, thrust], shape (n, 4).
+        """
+        import time
+        current_time = time.perf_counter()
+
+        n_agents = states.shape[0]
+        if agent_indices is None:
+            agent_indices = np.arange(n_agents)
+
+        pos_rb = target_pos - states[:, 0:3]
+        vel_rb = target_vel - states[:, 3:6]
+
+        # Compute dt for integration
+        if self.last_control_time is not None:
+            dt = current_time - self.last_control_time
+            dt = np.clip(dt, 0.001, 0.1)  # Clamp dt to reasonable range
+        else:
+            dt = 0.02  # Default ~50 Hz
+
+        self.last_control_time = current_time
+
+        # Update Z error integral only for the agents being controlled
+        z_error = pos_rb[:, 2]
+        self.z_error_integral[agent_indices] = self.z_error_integral[agent_indices] + z_error * dt
+        self.z_error_integral = np.clip(
+            self.z_error_integral,
+            -self.hover_integral_cap,
+            self.hover_integral_cap
+        )
+
+        # PD acceleration from pure pursuit
         accel = self._pure_pursuit(pos_rb, vel_rb)
+
+        # Add integral term to Z acceleration (use indices to get correct integral values)
+        accel[:, 2] = accel[:, 2] + self.hover_ki_z * self.z_error_integral[agent_indices]
+
         rpy_des, thrust_des = self._accel_to_attitude(accel, states[:, 6:9])
 
         return self._clip_and_pack(rpy_des, thrust_des)
@@ -635,7 +960,7 @@ class PursuerTeam(TeamBase):
         roll_des = np.clip(rpy_des[:, 0], -self.roll_pitch_max, self.roll_pitch_max)
         pitch_des = np.clip(rpy_des[:, 1], -self.roll_pitch_max, self.roll_pitch_max)
         yaw_des = np.clip(rpy_des[:, 2], -self.yaw_max, self.yaw_max)
-        thrust_clipped = np.clip(thrust_des, self.min_thrust, self.max_thrust)
+        thrust_clipped = np.clip(thrust_des, self.thrust_min, self.thrust_max)
 
         return np.stack([roll_des, pitch_des, yaw_des, thrust_clipped], axis=-1)
 
@@ -655,7 +980,7 @@ class EvaderTeam(TeamBase):
             policy: Loaded policy object with compute() method.
             policy_type: Type of policy ("ffn" or "acmpc").
         """
-        super().__init__('evader_team', config)
+        super().__init__('evader_team', 'evader', config)
 
         self.policy = policy
         self.policy_type = policy_type
@@ -684,9 +1009,8 @@ class EvaderTeam(TeamBase):
         """Handle status message and compute control."""
         if not self.team_initialized:
             self.initialize_team(msg.evader_cf_names)
-            initial_pos = self.states_to_np(msg.cf_evader_states)[:, 0:3]
-            initial_pos[:, 2] = self.blue_initial_height  # Set initial hover height
-            self.initial_pos = initial_pos
+            # Use full XYZ initial positions from config
+            self.initial_pos = self.blue_initial_pos.copy()
 
             # Build one-hot encoding for pursuer targets
             self.pursuer_targets = np.array(msg.pursuer_targets)
@@ -705,6 +1029,22 @@ class EvaderTeam(TeamBase):
         status = msg.status
 
         if status == Status.MAPE_STATUS_OFF:
+            return
+
+        # Command takeoff when in TAKEOFF status
+        if status == Status.MAPE_STATUS_TAKEOFF and not self.takeoff_commanded:
+            self.command_takeoff(self.blue_initial_height)
+            return
+
+        # Check if ready to switch to low-level control during TAKEOFF
+        if status == Status.MAPE_STATUS_TAKEOFF and not self.low_level_enabled:
+            blue_states_np = self.states_to_np(blue_states)
+            if self.check_ready_for_low_level(blue_states_np, self.blue_initial_height):
+                self.switch_to_low_level()
+            return  # Don't send attitude commands until switched
+
+        # Only send attitude commands if low-level control is enabled
+        if not self.low_level_enabled:
             return
 
         if not self.initialized_control:
@@ -734,26 +1074,56 @@ class EvaderTeam(TeamBase):
         if status == Status.MAPE_STATUS_OFF:
             return np.zeros((len(blue_states), 4))
 
-        elif status == Status.MAPE_STATUS_INITIALIZED:
-            # Use PD control for hover during initialization
+        elif status == Status.MAPE_STATUS_TAKEOFF or status == Status.MAPE_STATUS_INITIALIZED:
+            # Use PD control for hover (TAKEOFF included for brief transition period)
             blue_10d = np.concatenate([blue_states_np[:, :9], blue_states_np[:, 12:13]], axis=-1)
-            return self._pd_control(blue_10d, self.initial_pos, np.zeros_like(self.initial_pos))
+            return self._pid_control(blue_10d, self.initial_pos, np.zeros_like(self.initial_pos))
 
         elif status == Status.MAPE_STATUS_RUNNING:
             active_agents = (blue_states_np[:, 12] == 1)
+            inactive_agents = ~active_agents
+
+            # Reset settled state and integral for agents that become active again
+            self.agent_settled[active_agents] = False
+            # Reset integral for active agents (using policy, not PID)
+            self.z_error_integral[active_agents] = 0.0
 
             # Update initial pos for active agents
             self.initial_pos[active_agents] = blue_states_np[active_agents, 0:3].copy()
 
             controls = np.zeros((self.team_size, 4))
 
-            if np.any(~active_agents):
-                target_pos = self.initial_pos[~active_agents].copy()
-                target_pos[:, 2] += 0.1  # Hover slightly higher
-                blue_10d = np.concatenate([blue_states_np[~active_agents, :9],
-                                           blue_states_np[~active_agents, 12:13]], axis=-1)
-                controls_inactive = self._pd_control(blue_10d, target_pos, np.zeros_like(target_pos))
-                controls[~active_agents, :] = controls_inactive
+            # Handle inactive agents with settling behavior
+            if np.any(inactive_agents):
+                inactive_indices = np.where(inactive_agents)[0]
+                inactive_pos = blue_states_np[inactive_agents, 0:3]
+                inactive_vel = blue_states_np[inactive_agents, 3:6]
+                inactive_vel_mag = np.linalg.norm(inactive_vel, axis=1)
+
+                # Check which inactive agents have settled (velocity below threshold)
+                for i, idx in enumerate(inactive_indices):
+                    if not self.agent_settled[idx] and inactive_vel_mag[i] < self.settling_velocity_threshold:
+                        self.agent_settled[idx] = True
+                        self.settled_pos[idx] = inactive_pos[i]
+                        self.get_logger().info(f'BLUE {idx} settled at pos {self.settled_pos[idx]}')
+
+                # Build target positions for inactive agents
+                inactive_target_pos = np.zeros_like(inactive_pos)
+                for i, idx in enumerate(inactive_indices):
+                    if self.agent_settled[idx]:
+                        # Use settled position for hover
+                        inactive_target_pos[i] = self.settled_pos[idx]
+                    else:
+                        # Use current position to slow down
+                        inactive_target_pos[i] = inactive_pos[i]
+
+                blue_10d = np.concatenate([blue_states_np[inactive_agents, :9],
+                                           blue_states_np[inactive_agents, 12:13]], axis=-1)
+                controls_inactive = self._pid_control(
+                    blue_10d, inactive_target_pos, np.zeros_like(inactive_target_pos),
+                    agent_indices=inactive_indices
+                )
+                controls[inactive_agents, :] = controls_inactive
 
             if np.any(active_agents) and self.policy is not None:
                 controls_active = self._policy_control(
@@ -765,6 +1135,22 @@ class EvaderTeam(TeamBase):
                 # self.get_logger().info(f'policy control {controls}')
 
             return controls
+
+        elif status == Status.MAPE_STATUS_BLUE_WON or status == Status.MAPE_STATUS_RED_WON:
+            # Game over - hover at current/settled position
+            hover_pos = np.zeros_like(blue_states_np[:, 0:3])
+            for i in range(self.team_size):
+                if self.agent_settled[i]:
+                    hover_pos[i] = self.settled_pos[i]
+                else:
+                    hover_pos[i] = blue_states_np[i, 0:3]
+                    # Mark as settled if not already
+                    vel_mag = np.linalg.norm(blue_states_np[i, 3:6])
+                    if vel_mag < self.settling_velocity_threshold:
+                        self.agent_settled[i] = True
+                        self.settled_pos[i] = blue_states_np[i, 0:3]
+            blue_10d = np.concatenate([blue_states_np[:, :9], blue_states_np[:, 12:13]], axis=-1)
+            return self._pid_control(blue_10d, hover_pos, np.zeros_like(hover_pos))
 
         return np.zeros((len(blue_states), 4))
 
@@ -877,8 +1263,8 @@ class EvaderTeam(TeamBase):
         # Run policy inference (deterministic, no sampling)
         with torch.no_grad():
             obs_tensor = torch.tensor(observations, dtype=torch.float32, device='cpu')
-            inputs = {"states": obs_tensor}
-            mean_actions, _, _ = self.policy.compute(inputs)
+            inputs = {"observations": obs_tensor}
+            mean_actions, _ = self.policy.compute(inputs)
 
             if isinstance(mean_actions, torch.Tensor):
                 normalized_actions = mean_actions.numpy()
@@ -887,8 +1273,8 @@ class EvaderTeam(TeamBase):
 
         # Denormalize actions
         # Policy outputs normalized [-1, 1], physical = mean + normalized * scale
-        thrust_mean = (self.min_thrust + self.max_thrust) / 2.0
-        thrust_scale = (self.max_thrust - self.min_thrust) / 2.0
+        thrust_mean = (self.thrust_min + self.thrust_max) / 2.0
+        thrust_scale = (self.thrust_max - self.thrust_min) / 2.0
 
         action_mean = np.array([0.0, 0.0, 0.0, thrust_mean])
         action_scale = np.array([self.roll_pitch_max, self.roll_pitch_max, self.yaw_max, thrust_scale])
@@ -899,13 +1285,35 @@ class EvaderTeam(TeamBase):
         physical_actions[:, 0] = np.clip(physical_actions[:, 0], -self.roll_pitch_max, self.roll_pitch_max)
         physical_actions[:, 1] = np.clip(physical_actions[:, 1], -self.roll_pitch_max, self.roll_pitch_max)
         physical_actions[:, 2] = np.clip(physical_actions[:, 2], -self.yaw_max, self.yaw_max)
-        physical_actions[:, 3] = np.clip(physical_actions[:, 3], self.min_thrust, self.max_thrust)
+        physical_actions[:, 3] = np.clip(physical_actions[:, 3], self.thrust_min, self.thrust_max)
 
         return physical_actions
 
-    def _pd_control(self, states: np.ndarray, target_pos: np.ndarray,
-                    target_vel: np.ndarray) -> np.ndarray:
-        """PD position control for hover (same as PursuerTeam)."""
+    def _pid_control(self, states: np.ndarray, target_pos: np.ndarray,
+                     target_vel: np.ndarray, agent_indices: np.ndarray = None) -> np.ndarray:
+        """PID position control for hover.
+
+        Uses PD control for XY axes and PID control for Z axis to eliminate
+        steady-state error in altitude hover.
+
+        Args:
+            states: Agent states [pos, vel, rpy, active], shape (n, 10).
+            target_pos: Target positions, shape (n, 3).
+            target_vel: Target velocities, shape (n, 3).
+            agent_indices: Optional indices of agents being controlled. If None,
+                assumes all agents [0, 1, ..., n-1]. Required when controlling
+                a subset of agents to correctly update per-agent integral state.
+
+        Returns:
+            Control array [roll, pitch, yaw, thrust], shape (n, 4).
+        """
+        import time
+        current_time = time.perf_counter()
+
+        n_agents = states.shape[0]
+        if agent_indices is None:
+            agent_indices = np.arange(n_agents)
+
         k_pxy = self.config.get('pursuit_gains', {}).get('pp_k_pxy', 6.1624)
         k_vxy = self.config.get('pursuit_gains', {}).get('pp_k_vxy', 3.39)
         k_pz = self.config.get('pursuit_gains', {}).get('pp_k_pz', 20.0)
@@ -914,8 +1322,28 @@ class EvaderTeam(TeamBase):
         pos_rb = target_pos - states[:, 0:3]
         vel_rb = target_vel - states[:, 3:6]
 
+        # Compute dt for integration
+        if self.last_control_time is not None:
+            dt = current_time - self.last_control_time
+            dt = np.clip(dt, 0.001, 0.1)  # Clamp dt to reasonable range
+        else:
+            dt = 0.02  # Default ~50 Hz
+
+        self.last_control_time = current_time
+
+        # Update Z error integral only for the agents being controlled
+        z_error = pos_rb[:, 2]
+        self.z_error_integral[agent_indices] = self.z_error_integral[agent_indices] + z_error * dt
+        self.z_error_integral = np.clip(
+            self.z_error_integral,
+            -self.hover_integral_cap,
+            self.hover_integral_cap
+        )
+
         accel_xy = k_pxy * pos_rb[:, :2] + k_vxy * vel_rb[:, :2]
         accel_z = k_pz * pos_rb[:, 2:3] + k_vz * vel_rb[:, 2:3] + self.gravity
+        # Add integral term to Z acceleration (use indices to get correct integral values)
+        accel_z = accel_z + self.hover_ki_z * self.z_error_integral[agent_indices, None]
 
         accel = np.concatenate([accel_xy, accel_z], axis=-1)
 
@@ -943,6 +1371,6 @@ class EvaderTeam(TeamBase):
         roll_des = np.clip(rpy_des[:, 0], -self.roll_pitch_max, self.roll_pitch_max)
         pitch_des = np.clip(rpy_des[:, 1], -self.roll_pitch_max, self.roll_pitch_max)
         yaw_des = np.clip(rpy_des[:, 2], -self.yaw_max, self.yaw_max)
-        thrust_clipped = np.clip(current_thrust, self.min_thrust, self.max_thrust)
+        thrust_clipped = np.clip(current_thrust, self.thrust_min, self.thrust_max)
 
         return np.stack([roll_des, pitch_des, yaw_des, thrust_clipped], axis=-1)

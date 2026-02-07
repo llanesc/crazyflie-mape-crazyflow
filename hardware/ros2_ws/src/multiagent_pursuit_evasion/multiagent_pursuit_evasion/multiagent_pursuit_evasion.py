@@ -7,14 +7,26 @@ models/{policy_type}/ directory.
 
 import argparse
 import multiprocessing
+import os
 from pathlib import Path
 
+# =============================================================================
+# CURRICULUM LEVEL - Set this to use level-specific collision tolerances
+# =============================================================================
+# Set to None to use base config values, or an integer (0, 1, 2, ...) to use
+# parameters from that curriculum level (e.g., collision tolerances)
+CURRICULUM_LEVEL = 3  # e.g., 0, 1, 2, or None for base config
+# =============================================================================
+
 from ament_index_python.packages import get_package_share_directory
+
+# Package name for looking up source directory
+_PACKAGE_NAME = 'multiagent_pursuit_evasion'
 
 from multiagent_pursuit_evasion.policy_loader import load_config
 
 
-def run_server_process(n_blue: int, n_red: int, config: dict):
+def run_server_process(n_blue: int, n_red: int, config: dict, require_accel: bool = True):
     """Run the server node in a separate process with its own GIL."""
     # Import here to avoid issues with multiprocessing
     import rclpy
@@ -27,6 +39,7 @@ def run_server_process(n_blue: int, n_red: int, config: dict):
         n_blue=n_blue,
         n_red=n_red,
         config=config,
+        require_accel=require_accel,
     )
 
     executor = executors.SingleThreadedExecutor()
@@ -120,35 +133,64 @@ def run_pursuer_process(config: dict):
 def get_models_dir() -> Path:
     """Get the models directory path.
 
+    Prefers source directory over install to avoid rebuilds during development.
+
+    Order of preference:
+    1. MAPE_MODELS_DIR environment variable (if set)
+    2. Source directory (auto-detected from install path)
+    3. Relative to __file__ (for direct execution)
+    4. Installed share directory (fallback)
+
     Returns:
         Path to the models directory.
     """
-    # First try ROS2 share directory
+    # 1. Environment variable override (for maximum flexibility)
+    if 'MAPE_MODELS_DIR' in os.environ:
+        models_dir = Path(os.environ['MAPE_MODELS_DIR'])
+        if models_dir.exists():
+            return models_dir
+        print(f"Warning: MAPE_MODELS_DIR={models_dir} does not exist, trying auto-detection")
+
+    # 2. Auto-detect source directory from install path
+    # When running via ROS2, __file__ is in:
+    #   .../ros2_ws/install/{package}/lib/pythonX.X/site-packages/{package}/...
+    # We want to find:
+    #   .../ros2_ws/src/{package}/models/
+    file_path = Path(__file__).resolve()
+    path_str = str(file_path)
+
+    if '/install/' in path_str:
+        # Extract workspace root (everything before /install/)
+        ws_root = Path(path_str.split('/install/')[0])
+        src_models_dir = ws_root / 'src' / _PACKAGE_NAME / 'models'
+        if src_models_dir.exists():
+            return src_models_dir
+
+    # 3. Try relative to __file__ (for direct python execution or symlink install)
+    package_dir = file_path.parent.parent
+    src_models_dir = package_dir / 'models'
+    if src_models_dir.exists():
+        return src_models_dir
+
+    # 4. Fall back to installed share directory
     try:
-        share_dir = get_package_share_directory('multiagent_pursuit_evasion')
+        share_dir = get_package_share_directory(_PACKAGE_NAME)
         models_dir = Path(share_dir) / 'models'
         if models_dir.exists():
             return models_dir
     except Exception:
         pass
 
-    # Fallback to relative to this file's location (for development)
-    package_dir = Path(__file__).parent.parent
-    models_dir = package_dir / 'models'
-
-    if models_dir.exists():
-        return models_dir
-
     raise FileNotFoundError(
-        f"Models directory not found. "
-        "Please ensure the models/ directory exists in the package."
+        "Models directory not found. Set MAPE_MODELS_DIR environment variable or "
+        f"ensure models/ exists in src/{_PACKAGE_NAME}/"
     )
 
 
 def find_checkpoint(policy_type: str) -> Path:
     """Find the checkpoint file for a policy type.
 
-    Looks for best_agent_*.pt or final_checkpoint.pt in models/{policy_type}/.
+    Looks for best_agent.pt, best_agent_*.pt, or any .pt file in models/{policy_type}/.
 
     Args:
         policy_type: "ffn" or "acmpc".
@@ -162,7 +204,12 @@ def find_checkpoint(policy_type: str) -> Path:
     models_dir = get_models_dir()
     policy_dir = models_dir / policy_type.lower()
 
-    # Try best_agent_*.pt first (sorted by step number, highest first)
+    # Try best_agent.pt first (exact match)
+    best_agent = policy_dir / 'best_agent.pt'
+    if best_agent.exists():
+        return best_agent
+
+    # Try best_agent_*.pt (sorted by step number, highest first)
     best_agents = list(policy_dir.glob("best_agent_*.pt"))
     if best_agents:
         def get_step(p: Path) -> int:
@@ -173,14 +220,19 @@ def find_checkpoint(policy_type: str) -> Path:
         best_agents.sort(key=get_step, reverse=True)
         return best_agents[0]
 
-    # Fall back to final_checkpoint.pt
+    # Try final_checkpoint.pt
     final_checkpoint = policy_dir / 'final_checkpoint.pt'
     if final_checkpoint.exists():
         return final_checkpoint
 
+    # Fall back to any .pt file
+    pt_files = list(policy_dir.glob("*.pt"))
+    if pt_files:
+        return pt_files[0]
+
     raise FileNotFoundError(
         f"Checkpoint not found in {policy_dir}. "
-        f"Please copy best_agent_*.pt or final_checkpoint.pt to models/{policy_type.lower()}/"
+        f"Please copy a .pt checkpoint file to models/{policy_type.lower()}/"
     )
 
 
@@ -210,6 +262,53 @@ def find_config(policy_type: str) -> Path:
     )
 
 
+# Backwards compatibility: old param names -> new param names
+PARAM_NAME_ALIASES = {
+    "bb_crash_tolerance": "bb_collision_tolerance",
+    "rr_crash_tolerance": "rr_collision_tolerance",
+    "br_crash_tolerance": "rb_collision_tolerance",
+}
+
+
+def apply_curriculum_level(config: dict, level: int) -> dict:
+    """Apply curriculum level parameters to config.
+
+    Args:
+        config: Base configuration dictionary.
+        level: Curriculum level index (0, 1, 2, ...).
+
+    Returns:
+        Updated config with level parameters applied.
+    """
+    curriculum_levels = config.get('curriculum_levels')
+    if curriculum_levels is None:
+        print(f"Warning: CURRICULUM_LEVEL={level} but no curriculum_levels in config")
+        return config
+
+    if level < 0 or level >= len(curriculum_levels):
+        print(f"Warning: CURRICULUM_LEVEL={level} out of range (0-{len(curriculum_levels)-1})")
+        return config
+
+    level_config = curriculum_levels[level]
+    level_name = level_config.get("name", f"Level {level}")
+    print(f"Applying curriculum level {level}: {level_name}")
+
+    # Get level params (handle both JSON and YAML formats)
+    if "params" in level_config and isinstance(level_config["params"], dict):
+        level_params = level_config["params"]
+    else:
+        level_params = {k: v for k, v in level_config.items() if k not in ("name", "level", "spawn")}
+
+    # Apply level params to config
+    for param_name, param_value in level_params.items():
+        # Translate old param names to new ones
+        translated_name = PARAM_NAME_ALIASES.get(param_name, param_name)
+        config[translated_name] = param_value
+        print(f"  {translated_name}: {param_value}")
+
+    return config
+
+
 def main():
     """Main entry point."""
     # Use spawn to get fresh Python interpreter in child process
@@ -225,6 +324,12 @@ def main():
         default='ffn',
         help='Policy type: ffn or acmpc (default: ffn)'
     )
+    parser.add_argument(
+        '--require-accel',
+        action='store_true',
+        default=False,
+        help='Require acceleration data from blue agents (default: False)'
+    )
 
     args, _ = parser.parse_known_args()
 
@@ -237,7 +342,12 @@ def main():
         return 1
 
     print(f"Loading config from: {config_path}")
+    print(f"Loading checkpoint from: {checkpoint_path}")
     config = load_config(str(config_path))
+
+    # Apply curriculum level if specified
+    if CURRICULUM_LEVEL is not None:
+        config = apply_curriculum_level(config, CURRICULUM_LEVEL)
 
     n_blue = config['n_pairs']
     n_red = config['n_pairs']
@@ -248,10 +358,10 @@ def main():
     # Server process
     server_process = multiprocessing.Process(
         target=run_server_process,
-        args=(n_blue, n_red, config),
+        args=(n_blue, n_red, config, args.require_accel),
     )
     server_process.start()
-    print("Server process started")
+    print(f"Server process started (require_accel={args.require_accel})")
 
     # Evader process (with policy)
     evader_process = multiprocessing.Process(

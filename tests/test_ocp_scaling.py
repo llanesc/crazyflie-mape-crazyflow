@@ -206,12 +206,12 @@ def export_scaled_ocp(
 
     # Load physical parameters for thrust constraints
     drone_params = load_params("so_rpy", drone_model)
-    min_thrust = float(drone_params["thrust_min"]) * 4
-    max_thrust = float(drone_params["thrust_max"]) * 4
+    thrust_min = float(drone_params["thrust_min"]) * 4
+    thrust_max = float(drone_params["thrust_max"]) * 4
 
     # Control bounds in SCALED space
-    lbu_phys = np.array([-roll_pitch_max, -roll_pitch_max, -yaw_max, min_thrust])
-    ubu_phys = np.array([roll_pitch_max, roll_pitch_max, yaw_max, max_thrust])
+    lbu_phys = np.array([-roll_pitch_max, -roll_pitch_max, -yaw_max, thrust_min])
+    ubu_phys = np.array([roll_pitch_max, roll_pitch_max, yaw_max, thrust_max])
     ocp.constraints.lbu = lbu_phys * CTRL_SCALE_INV
     ocp.constraints.ubu = ubu_phys * CTRL_SCALE_INV
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])

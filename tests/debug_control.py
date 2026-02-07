@@ -17,8 +17,8 @@ print("=== Environment Config ===")
 print(f"Mass: {env_cfg.mass}")
 print(f"Gravity: {env_cfg.gravity}")
 print(f"Hover thrust: {env_cfg.mass * env_cfg.gravity}")
-print(f"Min thrust: {env_cfg.min_thrust}")
-print(f"Max thrust: {env_cfg.max_thrust}")
+print(f"Min thrust: {env_cfg.thrust_min}")
+print(f"Max thrust: {env_cfg.thrust_max}")
 
 # Reset environment
 obs_dict, info = env.reset()
@@ -66,8 +66,8 @@ hover_thrust = env_cfg.mass * env_cfg.gravity
 print(f"Hover thrust to apply: {hover_thrust}")
 
 # Create action dict with hover thrust (normalized)
-thrust_mean = (env_cfg.min_thrust + env_cfg.max_thrust) / 2.0
-thrust_scale = (env_cfg.max_thrust - env_cfg.min_thrust) / 2.0
+thrust_mean = (env_cfg.thrust_min + env_cfg.thrust_max) / 2.0
+thrust_scale = (env_cfg.thrust_max - env_cfg.thrust_min) / 2.0
 normalized_thrust = (hover_thrust - thrust_mean) / thrust_scale
 print(f"Normalized thrust: {normalized_thrust}")
 

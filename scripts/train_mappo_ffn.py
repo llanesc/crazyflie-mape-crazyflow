@@ -135,6 +135,9 @@ class TerminationLoggingWrapper:
 
     def _on_curriculum_level_change(self, level_idx: int, level_config: CurriculumLevel):
         """Handle curriculum level change by updating environment params."""
+        print(f"[DEBUG] Curriculum level change callback: level={level_idx}, name={level_config.name}")
+        print(f"[DEBUG] Level params: {level_config.params}")
+
         # Create spawn function if spawn config is provided
         spawn_fn = None
         if level_config.spawn:
@@ -145,6 +148,9 @@ class TerminationLoggingWrapper:
             spawn_fn=spawn_fn,
             **level_config.params,
         )
+        print(f"[DEBUG] After update: bb_tol={self._raw_env.cfg.bb_collision_tolerance}, "
+              f"rb_tol={self._raw_env.cfg.rb_collision_tolerance}, "
+              f"disturbance={self._raw_env.cfg.enable_disturbance}")
 
     def set_agent(self, agent):
         """Set the SKRL agent for logging."""
@@ -248,6 +254,14 @@ class TerminationLoggingWrapper:
             self._termination_counts["termination/red_win"] +
             self._termination_counts["termination/max_steps"]
         )
+
+        # DEBUG: Print termination counts
+        blue_wins = self._termination_counts["termination/blue_win"]
+        red_wins = self._termination_counts["termination/red_win"]
+        max_steps = self._termination_counts["termination/max_steps"]
+        blue_rate = blue_wins / total_terminations if total_terminations > 0 else 0.0
+        print(f"[DEBUG] Step {self._step_count}: blue_win={blue_wins:.0f}, red_win={red_wins:.0f}, max_steps={max_steps:.0f}, total={total_terminations:.0f}, blue_rate={blue_rate:.2%}")
+
         for key, count in self._termination_counts.items():
             self._agent.track_data(key, count)
             rate_key = key.replace("termination/", "termination_rate/")
@@ -575,6 +589,8 @@ def main():
         "random_target_assignment": env_cfg.random_target_assignment,
         # Physical parameters
         "mass": env_cfg.mass,
+        "thrust_min": env_cfg.thrust_min,
+        "thrust_max": env_cfg.thrust_max,
         # Domain randomization
         "randomize_mass": env_cfg.randomize_mass,
         "randomize_inertia": env_cfg.randomize_inertia,
@@ -631,6 +647,8 @@ def main():
             "pursuer_proximity_decay": env_cfg.reward_pursuer_proximity_decay,
             "angle_coef": env_cfg.reward_angle_coef,
             "velocity_coef": env_cfg.reward_velocity_coef,
+            "ground_proximity_coef": env_cfg.reward_ground_proximity_coef,
+            "ground_proximity_decay": env_cfg.reward_ground_proximity_decay,
             "action_coef": env_cfg.reward_action_coef,
             "action_smoothness_thrust": env_cfg.reward_action_smoothness_thrust,
             "action_smoothness_rpy": env_cfg.reward_action_smoothness_rpy,

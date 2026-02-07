@@ -10,6 +10,10 @@
             "justMyCode": false,
             "args": [
                 "--experiment", "action_penalty",
+                "--resume-run", "run_20260203031242",
+                "--curriculum-level", "8",
+                // "--render",
+                // "--render-interval", "1"
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
@@ -46,13 +50,14 @@
             "justMyCode": false,
             "args": [
                 "--experiment", "action_penalty",
-                "--checkpoint", "run_20260203031242",
-                "--level", "7",
-                "--n-episodes", "10",
+                "--checkpoint", "run_20260207143901",
+                "--level", "1",
+                "--n-episodes", "100",
                 "--device", "cpu",
                 "--deterministic",
-                "--render",
-                "--step",  "1m"
+                "--no-domain-rand",
+                "--no-disturbance"
+                // "--render",
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
@@ -95,6 +100,29 @@
                 "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
             },
             "cwd": "${workspaceFolder}"
-        }
+        },
+                {
+            "name": "Eval MAPPO ACMPC (with level)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/eval_mappo_acmpc.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--experiment", "action_penalty",
+                "--checkpoint", "run_20260207143901",
+                "--level", "1",
+                "--n-episodes", "100",
+                "--device", "cpu",
+                "--deterministic",
+                "--no-domain-rand",
+                "--no-disturbance"
+                // "--render",
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
+            },
+            "cwd": "${workspaceFolder}"
+        },
     ]
 }

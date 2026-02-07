@@ -177,9 +177,10 @@ void MapePanel::setupUI()
   auto * control_group = new QGroupBox("Control", this);
   auto * control_layout = new QHBoxLayout(control_group);
 
-  initialize_button_ = new QPushButton("Initialize", this);
-  initialize_button_->setMinimumHeight(40);
-  initialize_button_->setEnabled(false);
+  takeoff_button_ = new QPushButton("Takeoff", this);
+  takeoff_button_->setMinimumHeight(40);
+  takeoff_button_->setEnabled(false);
+  takeoff_button_->setStyleSheet("QPushButton:enabled { background-color: #2196F3; color: white; }");
 
   run_button_ = new QPushButton("Run", this);
   run_button_->setMinimumHeight(40);
@@ -191,11 +192,11 @@ void MapePanel::setupUI()
   off_button_->setEnabled(false);
   off_button_->setStyleSheet("QPushButton:enabled { background-color: #f44336; color: white; }");
 
-  control_layout->addWidget(initialize_button_);
+  control_layout->addWidget(takeoff_button_);
   control_layout->addWidget(run_button_);
   control_layout->addWidget(off_button_);
 
-  connect(initialize_button_, &QPushButton::clicked, this, &MapePanel::onInitializeButtonClicked);
+  connect(takeoff_button_, &QPushButton::clicked, this, &MapePanel::onTakeoffButtonClicked);
   connect(run_button_, &QPushButton::clicked, this, &MapePanel::onRunButtonClicked);
   connect(off_button_, &QPushButton::clicked, this, &MapePanel::onOffButtonClicked);
 
@@ -279,7 +280,7 @@ void MapePanel::updateUI()
   if (!status) {
     status_value_label_->setText("DISCONNECTED");
     status_value_label_->setStyleSheet("font-weight: bold; color: gray;");
-    initialize_button_->setEnabled(false);
+    takeoff_button_->setEnabled(false);
     run_button_->setEnabled(false);
     off_button_->setEnabled(false);
     return;
@@ -290,21 +291,42 @@ void MapePanel::updateUI()
     case STATUS_OFF:
       status_value_label_->setText("OFF");
       status_value_label_->setStyleSheet("font-weight: bold; color: #666;");
-      initialize_button_->setEnabled(true);
+      takeoff_button_->setEnabled(true);
       run_button_->setEnabled(false);
       off_button_->setEnabled(false);
+      break;
+    case STATUS_TAKEOFF:
+      status_value_label_->setText("TAKING OFF");
+      status_value_label_->setStyleSheet("font-weight: bold; color: #2196F3;");
+      takeoff_button_->setEnabled(false);
+      run_button_->setEnabled(false);
+      off_button_->setEnabled(true);
       break;
     case STATUS_INITIALIZED:
       status_value_label_->setText("INITIALIZED");
       status_value_label_->setStyleSheet("font-weight: bold; color: #FF9800;");
-      initialize_button_->setEnabled(false);
+      takeoff_button_->setEnabled(false);
       run_button_->setEnabled(true);  // Only enable Run when INITIALIZED
       off_button_->setEnabled(true);
       break;
     case STATUS_RUNNING:
       status_value_label_->setText("RUNNING");
       status_value_label_->setStyleSheet("font-weight: bold; color: #4CAF50;");
-      initialize_button_->setEnabled(false);
+      takeoff_button_->setEnabled(false);
+      run_button_->setEnabled(false);
+      off_button_->setEnabled(true);
+      break;
+    case STATUS_BLUE_WON:
+      status_value_label_->setText("BLUE WON");
+      status_value_label_->setStyleSheet("font-weight: bold; color: #2196F3;");
+      takeoff_button_->setEnabled(false);
+      run_button_->setEnabled(false);
+      off_button_->setEnabled(true);
+      break;
+    case STATUS_RED_WON:
+      status_value_label_->setText("RED WON");
+      status_value_label_->setStyleSheet("font-weight: bold; color: #f44336;");
+      takeoff_button_->setEnabled(false);
       run_button_->setEnabled(false);
       off_button_->setEnabled(true);
       break;
@@ -386,9 +408,9 @@ void MapePanel::updateDroneStatusWidgets()
   }
 }
 
-void MapePanel::onInitializeButtonClicked()
+void MapePanel::onTakeoffButtonClicked()
 {
-  callCommandService(multiagent_pursuit_evasion_interfaces::srv::Command::Request::MAPE_CMD_INITIALIZE);
+  callCommandService(multiagent_pursuit_evasion_interfaces::srv::Command::Request::MAPE_CMD_TAKEOFF);
 }
 
 void MapePanel::onRunButtonClicked()

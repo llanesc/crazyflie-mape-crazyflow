@@ -23,10 +23,10 @@ env = RedVsBlueEnv(cfg=env_cfg)
 print(f'Mass: {env_cfg.mass}')
 print(f'Gravity: {env_cfg.gravity}')
 print(f'Hover thrust: {env_cfg.mass * env_cfg.gravity}')
-print(f'Min thrust: {env_cfg.min_thrust}')
-print(f'Max thrust: {env_cfg.max_thrust}')
-print(f'Thrust mean: {(env_cfg.min_thrust + env_cfg.max_thrust) / 2.0}')
-print(f'Thrust scale: {(env_cfg.max_thrust - env_cfg.min_thrust) / 2.0}')
+print(f'Min thrust: {env_cfg.thrust_min}')
+print(f'Max thrust: {env_cfg.thrust_max}')
+print(f'Thrust mean: {(env_cfg.thrust_min + env_cfg.thrust_max) / 2.0}')
+print(f'Thrust scale: {(env_cfg.thrust_max - env_cfg.thrust_min) / 2.0}')
 
 # Create policy
 sample_obs_space = env.observation_space[env.possible_agents[0]]
@@ -66,8 +66,8 @@ with torch.no_grad():
 print(f'\nNormalized action: {action.numpy()[0]}')
 
 # Denormalize to see physical values
-thrust_mean = (env_cfg.min_thrust + env_cfg.max_thrust) / 2.0
-thrust_scale = (env_cfg.max_thrust - env_cfg.min_thrust) / 2.0
+thrust_mean = (env_cfg.thrust_min + env_cfg.thrust_max) / 2.0
+thrust_scale = (env_cfg.thrust_max - env_cfg.thrust_min) / 2.0
 action_mean = np.array([0.0, 0.0, 0.0, thrust_mean])
 action_scale = np.array([MAX_ROLL_PITCH, MAX_ROLL_PITCH, MAX_YAW, thrust_scale])
 

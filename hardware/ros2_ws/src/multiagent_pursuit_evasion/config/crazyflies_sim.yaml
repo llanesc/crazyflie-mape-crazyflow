@@ -26,37 +26,6 @@ robots:
     initial_position: [1.0, 0.0, 0.0]
     type: cf_red_sim
 
-  cf231:
-    enabled: false
-    uri: radio://0/80/2M/E7E7E7E7E7
-    initial_position: [0.0, 0.0, 0.0]
-    type: cf21  # see robot_types
-    # firmware_params:
-    #   kalman:
-    #     pNAcc_xy: 1.0 # default 0.5
-    # firmware_logging:
-    #   enabled: true
-    #   custom_topics:
-    #     topic_name3: 
-    #       frequency: 1
-    #       vars: ["acc.x", "acc.y"]
-    # reference_frame: "odom_cf231" # use a custom reference frame if no global coordinate system is available
-
-  cf5:
-    enabled: false
-    uri: radio://0/80/2M/E7E7E7E705
-    initial_position: [0.0, -0.5, 0.0]
-    type: cf21  # see robot_types
-    # firmware_params:
-    #   kalman:
-    #     pNAcc_xy: 1.0 # default 0.5
-    #firmware_logging:
-    #  custom_topics:
-    #    topic_name3: 
-    #      frequency: 1
-    #      vars: ["acc.x", "acc.y", "acc.z"]
-    # reference_frame: "odom_cf5" 
-
 # Definition of the various robot types
 robot_types:
   cf_blue_sim:
@@ -67,12 +36,11 @@ robot_types:
       enabled: true
       default_topics:
         odom:
-          frequency: 100
+          frequency: 50
+      custom_topics:
         body_rates:
-          frequency: 100
-        accel:
-          frequency: 100
-
+          frequency: 50
+          vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
         # pose:
         #   frequency: 100
       # angular_velocity:
@@ -88,9 +56,11 @@ robot_types:
       enabled: true
       default_topics:
         odom:
-          frequency: 100
+          frequency: 50
+      custom_topics:
         body_rates:
-          frequency: 100
+          frequency: 50
+          vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
         # pose:
         #   frequency: 100
       # angular_velocity:
@@ -172,7 +142,7 @@ all:
       enHighLevel: 1
     stabilizer:
       estimator: 2 # 1: complementary, 2: kalman
-      controller: 1 # 1: PID, 2: mellinger
+      controller: 2 # 1: PID, 2: mellinger
     flightmode:
       stabModeRoll: 1
       stabModePitch: 1

@@ -97,7 +97,7 @@ def main():
     t0 = time.perf_counter()
     for _ in range(n_iter):
         rpy_clipped = jnp.clip(rpy_des, -0.5, 0.5)
-        thrust_clipped = jnp.clip(thrust_des, env.cfg.min_thrust, env.cfg.max_thrust)
+        thrust_clipped = jnp.clip(thrust_des, env.cfg.thrust_min, env.cfg.thrust_max)
         red_cmd = jnp.concatenate([rpy_clipped, thrust_clipped[..., None]], axis=-1)
         red_cmd = red_cmd * env.red_alive[:, :, None]
         all_cmd = jnp.concatenate([env.blue_cmd, red_cmd], axis=1)

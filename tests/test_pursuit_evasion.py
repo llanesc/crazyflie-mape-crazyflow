@@ -59,15 +59,15 @@ def main():
 
     # Simulation parameters
     sim_freq = 500  # Hz
-    ctrl_freq = 100  # Hz
+    ctrl_freq = 50  # Hz
     steps_per_ctrl = sim_freq // ctrl_freq
 
     # Load drone parameters
     drone_params = load_params("so_rpy", args.drone_model)
     mass = float(drone_params["mass"])
     gravity = float(np.abs(drone_params["gravity_vec"][2]))
-    min_thrust = float(drone_params["thrust_min"]) * 4
-    max_thrust = float(drone_params["thrust_max"]) * 4
+    thrust_min = mass * gravity * 0.5  # 10% hover thrust
+    thrust_max = mass * gravity * 1.5  # 1.5x hover thrust
 
     # Load first_principles params to get rpm2thrust coefficients for hover RPM calculation
     fp_params = load_params("first_principles", args.drone_model)
@@ -84,7 +84,7 @@ def main():
     print(f"Drone parameters:")
     print(f"  mass: {mass:.4f} kg")
     print(f"  gravity: {gravity:.2f} m/s^2")
-    print(f"  thrust range: [{min_thrust:.3f}, {max_thrust:.3f}] N")
+    print(f"  thrust range: [{thrust_min:.3f}, {thrust_max:.3f}] N")
     print(f"  rpm2thrust: {rpm2thrust}")
     print(f"  hover RPM: {hover_rpm:.1f}")
 
@@ -96,8 +96,6 @@ def main():
         physics=Physics.first_principles,
         control=Control.attitude,
         freq=sim_freq,
-        state_freq=ctrl_freq,
-        attitude_freq=ctrl_freq,
     )
 
     # Parametrize state2attitude controller for the evader
@@ -123,10 +121,30 @@ def main():
         # Reset sim
         sim.reset()
 
-        # Initial positions
-        # Blue evader starts at origin, red pursuer starts offset
-        evader_start = np.array([0.0, 0.0, 1.0])
-        pursuer_start = np.array([2.0, 2.0, 1.0])
+        # Large altitude change test
+        # Evader starts low and goes high, pursuer starts nearby low
+        boundary = 2.0  # meters
+
+        # Evader starts low
+        evader_start = np.array([
+            np.random.uniform(-boundary, boundary),
+            np.random.uniform(-boundary, boundary),
+            np.random.uniform(0.5, 1.0)  # low altitude
+        ])
+
+        # Pursuer starts nearby at similar low altitude
+        pursuer_start = np.array([
+            evader_start[0] + np.random.uniform(1.5, 2.5),
+            evader_start[1] + np.random.uniform(1.5, 2.5),
+            np.random.uniform(0.5, 1.0)  # low altitude
+        ])
+
+        # Evader goal is HIGH - large altitude change
+        evader_goal = np.array([
+            np.random.uniform(-boundary, boundary),
+            np.random.uniform(-boundary, boundary),
+            np.random.uniform(2.0, 2.5)  # high altitude
+        ])
 
         # Set initial positions and set initial rotor velocities for hover
         hover_rotor_vel = hover_rpm * np.ones(4)
@@ -137,12 +155,6 @@ def main():
             )
         )
 
-        # Evader trajectory parameters (figure-8 pattern)
-        fig8_radius = 1.0  # meters
-        fig8_period = 8.0  # seconds for one complete figure-8
-        fig8_center = np.array([0.0, 0.0, 1.2])  # center of figure-8
-        fig8_phase = np.random.uniform(0, 2 * np.pi)  # random starting phase
-
         # Initialize integral error for evader controller
         int_pos_err = np.zeros(3)
 
@@ -152,8 +164,9 @@ def main():
         last_render_time = time.time()
 
         print(f"\n=== Episode {episode + 1}/{args.episodes} ===")
-        print(f"  Evader trajectory: figure-8, radius={fig8_radius}m, period={fig8_period}s, phase={fig8_phase:.2f}rad")
-        print(f"  Pursuer start: {pursuer_start}")
+        print(f"  Evader start: [{evader_start[0]:.2f}, {evader_start[1]:.2f}, {evader_start[2]:.2f}]")
+        print(f"  Evader goal:  [{evader_goal[0]:.2f}, {evader_goal[1]:.2f}, {evader_goal[2]:.2f}]")
+        print(f"  Pursuer start: [{pursuer_start[0]:.2f}, {pursuer_start[1]:.2f}, {pursuer_start[2]:.2f}]")
 
         for step in range(n_steps):
             t = step / ctrl_freq
@@ -183,26 +196,10 @@ def main():
                 break  # End simulation on capture
 
             # === Blue Evader Controller (state2attitude) ===
-            # Figure-8 trajectory: x = r*sin(wt + phase), y = r*sin(2(wt + phase))/2, z = constant
-            omega = 2 * np.pi / fig8_period
-            theta = omega * t + fig8_phase
-            evader_target_pos = fig8_center + np.array([
-                fig8_radius * np.sin(theta),
-                fig8_radius * np.sin(2 * theta) / 2,
-                0.0
-            ])
-            # Analytical velocity: dx/dt, dy/dt
-            evader_target_vel = np.array([
-                fig8_radius * omega * np.cos(theta),
-                fig8_radius * omega * np.cos(2 * theta),
-                0.0
-            ])
-            # Analytical acceleration: d2x/dt2, d2y/dt2
-            evader_target_acc = np.array([
-                -fig8_radius * omega**2 * np.sin(theta),
-                -2 * fig8_radius * omega**2 * np.sin(2 * theta),
-                0.0
-            ])
+            # Hover at goal position
+            evader_target_pos = evader_goal
+            evader_target_vel = np.zeros(3)
+            evader_target_acc = np.zeros(3)
 
             # Build command: [x, y, z, vx, vy, vz, ax, ay, az, yaw, roll_rate, pitch_rate, yaw_rate]
             evader_cmd = np.zeros(13)
@@ -223,10 +220,11 @@ def main():
             )
             evader_action = np.array(evader_rpyt)
 
-            # Clip evader roll/pitch/yaw
+            # Clip evader roll/pitch/yaw and thrust
             evader_action[0] = np.clip(evader_action[0], -roll_pitch_max, roll_pitch_max)
             evader_action[1] = np.clip(evader_action[1], -roll_pitch_max, roll_pitch_max)
             evader_action[2] = np.clip(evader_action[2], -yaw_max, yaw_max)
+            evader_action[3] = np.clip(evader_action[3], thrust_min, thrust_max)
 
             # === Red Pursuer Controller (ProNav + accel_to_attitude) ===
             # Relative position and velocity (target - pursuer)
@@ -246,7 +244,7 @@ def main():
             rpy_des, thrust_des = accel_to_attitude(accel_cmd, pursuer_quat, mass=mass)
 
             # Clip thrust to valid range
-            thrust_des = jnp.clip(thrust_des, min_thrust, max_thrust)
+            thrust_des = jnp.clip(thrust_des, thrust_min, thrust_max)
 
             pursuer_action = np.array([
                 float(rpy_des[0]),
@@ -313,7 +311,7 @@ def main():
 
             # Print progress
             if step % (ctrl_freq * 2) == 0:  # Every 2 seconds
-                print(f"  t={t:.1f}s: dist={distance:.3f}m")
+                print(f"  t={t:.1f}s: dist={distance:.3f}m, evader_z={evader_pos[2]:.3f}m, pursuer_z={pursuer_pos[2]:.3f}m")
 
         # Episode ended without capture
         if not captured:

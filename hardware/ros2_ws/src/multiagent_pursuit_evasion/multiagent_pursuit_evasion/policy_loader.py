@@ -12,6 +12,47 @@ import numpy as np
 import torch
 
 
+def find_checkpoint(checkpoint_path: str) -> Path:
+    """Find a .pt checkpoint file from a path.
+
+    Args:
+        checkpoint_path: Path to a .pt file or directory containing .pt files.
+
+    Returns:
+        Path to the checkpoint file.
+
+    Raises:
+        FileNotFoundError: If no checkpoint file is found.
+    """
+    checkpoint_path = Path(checkpoint_path)
+
+    if checkpoint_path.is_file() and checkpoint_path.suffix == '.pt':
+        return checkpoint_path
+
+    if checkpoint_path.is_dir():
+        # Search for .pt files in the directory
+        pt_files = list(checkpoint_path.glob('*.pt'))
+        if not pt_files:
+            # Also check subdirectories
+            pt_files = list(checkpoint_path.glob('**/*.pt'))
+
+        if not pt_files:
+            raise FileNotFoundError(f"No .pt files found in: {checkpoint_path}")
+
+        # Prefer 'best_agent.pt' if available
+        for pt_file in pt_files:
+            if pt_file.name == 'best_agent.pt':
+                return pt_file
+
+        # Otherwise return the first one found
+        return pt_files[0]
+
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
+
+    raise FileNotFoundError(f"Invalid checkpoint path: {checkpoint_path}")
+
+
 def load_policy(
     policy_type: str,
     checkpoint_path: str,
@@ -22,7 +63,7 @@ def load_policy(
 
     Args:
         policy_type: Type of policy ("ffn" or "acmpc").
-        checkpoint_path: Path to the SKRL checkpoint (.pt file).
+        checkpoint_path: Path to a .pt file or directory containing .pt files.
         config: Environment configuration dictionary.
         device: Device to load model on ("cpu" or "cuda").
 
@@ -34,9 +75,7 @@ def load_policy(
         ImportError: If required modules are not available.
         FileNotFoundError: If checkpoint file doesn't exist.
     """
-    checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    checkpoint_path = find_checkpoint(checkpoint_path)
 
     # Get dimensions from config
     n_pairs = config.get('n_pairs', 2)
@@ -56,18 +95,18 @@ def load_policy(
     # Load drone params for action space bounds
     from drone_models.core import load_params
     drone_params = load_params("so_rpy", drone_model)
-    # min_thrust = float(drone_params["thrust_min"]) * 4
-    # max_thrust = float(drone_params["thrust_max"]) * 4
+    # thrust_min = float(drone_params["thrust_min"]) * 4
+    # thrust_max = float(drone_params["thrust_max"]) * 4
     mass = float(drone_params["mass"]) + 4.9/1000.0
     gravity = float(np.abs(drone_params["gravity_vec"][2]))
-    # self.min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
-    # self.max_thrust = float(drone_params["thrust_max"]) * 4
-    min_thrust = mass * gravity * 0.5 
-    max_thrust = mass * gravity * 1.5
+    # self.thrust_min = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
+    # self.thrust_max = float(drone_params["thrust_max"]) * 4
+    thrust_min = mass * gravity * 0.5 
+    thrust_max = mass * gravity * 1.5
 
     action_space = gymnasium.spaces.Box(
-        low=np.array([-roll_pitch_max, -roll_pitch_max, -yaw_max, min_thrust], dtype=np.float32),
-        high=np.array([roll_pitch_max, roll_pitch_max, yaw_max, max_thrust], dtype=np.float32),
+        low=np.array([-roll_pitch_max, -roll_pitch_max, -yaw_max, thrust_min], dtype=np.float32),
+        high=np.array([roll_pitch_max, roll_pitch_max, yaw_max, thrust_max], dtype=np.float32),
         dtype=np.float32
     )
 
@@ -226,6 +265,16 @@ def _load_acmpc_policy(
     yaw_max = config.get('yaw_max', 0.1)
     drone_model = config.get('drone_model', 'cf2x_T350')
 
+    # Load physical parameters from config, fallback to drone-models
+    from drone_models.core import load_params
+    drone_params = load_params("so_rpy", drone_model)
+    gravity = float(np.abs(drone_params["gravity_vec"][2]))
+
+    # Use config values if provided, otherwise compute from drone_params
+    mass = config.get('mass', float(drone_params["mass"]) + 4.9/1000.0)
+    thrust_min = config.get('thrust_min', mass * gravity * 0.5)
+    thrust_max = config.get('thrust_max', mass * gravity * 1.5)
+
     # Create policy
     policy = LeapCSharedGaussianPolicy(
         observation_space=observation_space,
@@ -241,12 +290,15 @@ def _load_acmpc_policy(
         hidden_dim=hidden_dim,
         roll_pitch_max=roll_pitch_max,
         yaw_max=yaw_max,
+        thrust_min=thrust_min,
+        thrust_max=thrust_max,
+        mass=mass,
+        gravity=gravity,
         drone_model=drone_model,
         n_batch_max=16,  # Small batch for hardware
         num_threads=4,
         velocity_max=velocity_max,
         activation=activation,
-        verbose=False,
     )
 
     # Load checkpoint

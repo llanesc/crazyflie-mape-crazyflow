@@ -23,10 +23,10 @@ class RedVsBlueEnvConfig:
         drone_model: Drone model identifier for parameters.
         pursuer_strategy: Red team pursuit strategy ("PP" or "ProNav").
 
-        mass: Drone mass [kg] (loaded from drone_model).
+        mass: Simulation drone mass [kg] (loaded from drone_model).
         gravity: Gravity magnitude [m/s^2] (loaded from drone_model).
-        min_thrust: Minimum collective thrust [N] (loaded from drone_model).
-        max_thrust: Maximum collective thrust [N] (loaded from drone_model).
+        thrust_min: Minimum collective thrust [N] (loaded from drone_model).
+        thrust_max: Maximum collective thrust [N] (loaded from drone_model).
 
         bb_collision_tolerance: Blue-blue collision distance [m].
         rr_collision_tolerance: Red-red collision distance [m].
@@ -79,10 +79,10 @@ class RedVsBlueEnvConfig:
     pursuer_strategy: str = "ProNav"  # "PP" or "ProNav"
 
     # Physical parameters (computed from drone_model in __post_init__, can be overridden)
-    mass: float | None = None  # If None, loaded from drone_model
+    mass: float | None = None  # Simulation mass [kg], if None loaded from drone_model
     gravity: float = field(init=False)
-    min_thrust: float = field(init=False)
-    max_thrust: float = field(init=False)
+    thrust_min: float | None = None  # If None, computed as mass * gravity * 0.5
+    thrust_max: float | None = None  # If None, computed as mass * gravity * 1.5
 
     # Domain randomization
     randomize_mass: bool = False  # Randomize mass with normal distribution
@@ -122,7 +122,7 @@ class RedVsBlueEnvConfig:
     pp_k_vz: float = 10.0
 
     # Attitude limits
-    roll_pitch_max: float = 0.5  # rad (~28 degrees)
+    roll_pitch_max: float = 0.2
     yaw_max: float = 0.1
 
     # Reward scales
@@ -146,14 +146,15 @@ class RedVsBlueEnvConfig:
     # Velocity penalty (penalizes high speeds)
     reward_velocity_coef: float = 0.0  # Coefficient for ||velocity||² penalty
 
+    # Ground proximity penalty (penalizes flying too close to ground)
+    reward_ground_proximity_coef: float = 0.0  # Coefficient for ground proximity penalty
+    reward_ground_proximity_decay: float = 10.0  # Exponential decay rate (higher = sharper transition)
+
     # Target assignment
     random_target_assignment: bool = False  # Randomize red->blue target assignment at reset
 
     # Device
     device: str = "cpu"
-
-    # Debug
-    debug_timing: bool = False  # Print detailed timing per step (for performance debugging)
 
     def __post_init__(self):
         """Compute derived values and load physical parameters."""
@@ -167,10 +168,11 @@ class RedVsBlueEnvConfig:
         if self.mass is None:
             self.mass = float(drone_params["mass"])
         self.gravity = float(np.abs(drone_params["gravity_vec"][2]))
-        # self.min_thrust = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
-        # self.max_thrust = float(drone_params["thrust_max"]) * 4
-        self.min_thrust = self.mass * self.gravity * 0.5
-        self.max_thrust = self.mass * self.gravity * 1.5
+        # Use user-provided thrust limits or compute from mass/gravity
+        if self.thrust_min is None:
+            self.thrust_min = self.mass * self.gravity * 0.5
+        if self.thrust_max is None:
+            self.thrust_max = self.mass * self.gravity * 1.5
 
     @property
     def sim_steps_per_mellinger(self) -> int:

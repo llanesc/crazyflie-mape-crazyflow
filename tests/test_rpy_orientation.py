@@ -33,13 +33,13 @@ def run_test():
 
     # Get hover thrust (normalized to [-1, 1])
     hover_thrust = env_cfg.mass * env_cfg.gravity
-    thrust_mean = (env_cfg.min_thrust + env_cfg.max_thrust) / 2.0
-    thrust_scale = (env_cfg.max_thrust - env_cfg.min_thrust) / 2.0
+    thrust_mean = (env_cfg.thrust_min + env_cfg.thrust_max) / 2.0
+    thrust_scale = (env_cfg.thrust_max - env_cfg.thrust_min) / 2.0
     hover_thrust_normalized = (hover_thrust - thrust_mean) / thrust_scale
 
     print(f"Hover thrust: {hover_thrust:.4f} N")
     print(f"Normalized hover thrust: {hover_thrust_normalized:.4f}")
-    print(f"Thrust range: [{env_cfg.min_thrust:.4f}, {env_cfg.max_thrust:.4f}] N")
+    print(f"Thrust range: [{env_cfg.thrust_min:.4f}, {env_cfg.thrust_max:.4f}] N")
     print()
 
     # Test sequence: (name, roll, pitch, yaw, duration)

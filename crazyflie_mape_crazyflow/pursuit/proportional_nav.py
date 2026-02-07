@@ -55,8 +55,8 @@ def pronav_with_axial(
 
     # Axial (Speed Floor)
     # Only accelerate if we drop below the minimum threshold (no upper bound)
-    pursuer_speed = jnp.linalg.norm(vel_pursuer, axis=-1, keepdims=True) + 1e-6
-    vel_pursuer_unit = vel_pursuer / pursuer_speed
+    # Use signed dot product: positive when closing, negative when moving away
+    pursuer_speed = jnp.sum(vel_pursuer * u_r, axis=-1, keepdims=True)
     a_axial_mag = jnp.maximum(0.0, K_v * (V_min - pursuer_speed))
     a_axial = a_axial_mag * u_r
 

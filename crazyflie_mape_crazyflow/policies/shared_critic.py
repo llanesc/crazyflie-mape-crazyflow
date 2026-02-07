@@ -69,7 +69,7 @@ class SharedCritic(DeterministicMixin, Model):
             activation: Hidden layer activation function name
                 (relu, tanh, elu, leaky_relu, gelu).
         """
-        Model.__init__(self, observation_space, action_space, device)
+        Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         DeterministicMixin.__init__(self, clip_actions=clip_actions)
 
         obs_dim = gymnasium.spaces.flatdim(observation_space)

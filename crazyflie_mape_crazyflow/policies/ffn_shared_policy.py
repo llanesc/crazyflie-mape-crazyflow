@@ -86,7 +86,7 @@ class FFNSharedGaussianPolicy(GaussianMixin, Model):
             activation: Hidden layer activation function name
                 (relu, tanh, elu, leaky_relu, gelu).
         """
-        Model.__init__(self, observation_space, action_space, device)
+        Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         GaussianMixin.__init__(
             self,
             clip_actions=clip_actions,
@@ -131,17 +131,18 @@ class FFNSharedGaussianPolicy(GaussianMixin, Model):
         self,
         inputs: Mapping[str, torch.Tensor],
         role: str = "",
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Mapping[str, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Mapping[str, torch.Tensor]]:
         """Compute actions from observations.
 
         Args:
-            inputs: Dictionary containing observations.
+            inputs: Dictionary containing observations (SKRL 2.0 format).
             role: Model role (unused).
 
         Returns:
-            Tuple of (actions, log_prob, outputs).
+            Tuple of (mean_actions, outputs_dict) where outputs_dict contains "log_std".
         """
-        obs = inputs["states"]
+        # SKRL 2.0: per-agent observations are under "observations" key
+        obs = inputs["observations"]
 
         # Convert to tensor if needed
         if not isinstance(obs, torch.Tensor):
@@ -153,10 +154,11 @@ class FFNSharedGaussianPolicy(GaussianMixin, Model):
         # Get log std
         log_std = self.log_std_parameter
         if self._g_clip_log_std:
-            log_std = torch.clamp(log_std, self._g_log_std_min, self._g_log_std_max)
+            log_std = torch.clamp(log_std, self._g_min_log_std, self._g_max_log_std)
 
         # Store for distribution computation
         self._log_std = log_std
         self._num_samples = mean_actions.shape[0]
 
-        return mean_actions, log_std, {}
+        # SKRL 2.0: return (mean_actions, outputs_dict) with "log_std" in outputs
+        return mean_actions, {"log_std": log_std}

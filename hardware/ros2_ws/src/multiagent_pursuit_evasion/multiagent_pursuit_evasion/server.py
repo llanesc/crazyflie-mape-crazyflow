@@ -16,12 +16,12 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from nav_msgs.msg import Odometry
 from crazyflie_interfaces.msg import LogDataGeneric
 from multiagent_pursuit_evasion_interfaces.msg import Status, EvaderState, PursuerState
-from multiagent_pursuit_evasion_interfaces.srv import Command
+from multiagent_pursuit_evasion_interfaces.srv import Command, ReadyForLowLevel
 
 from functools import partial
 
 
-STATUS_PUBLISHER_FREQUENCY = 100  # Hz
+STATUS_PUBLISHER_FREQUENCY = 50  # Hz
 GRAVITY = 9.81
 
 
@@ -33,13 +33,14 @@ class MultiAgentPursuitEvasionServer(Node):
     Handles collision detection, boundary violations, and target reassignment.
     """
 
-    def __init__(self, n_blue: int, n_red: int, config: dict):
+    def __init__(self, n_blue: int, n_red: int, config: dict, require_accel: bool = True):
         """Initialize the server.
 
         Args:
             n_blue: Number of blue (evader) agents.
             n_red: Number of red (pursuer) agents.
             config: Environment configuration dictionary.
+            require_accel: Whether acceleration data is required for blue agents.
         """
         super().__init__('multiagent_pursuit_evasion_server')
 
@@ -48,6 +49,7 @@ class MultiAgentPursuitEvasionServer(Node):
         self.n_red = n_red
         self.n_total_agents = n_blue + n_red
         self.config = config
+        self.require_accel = require_accel
 
         # Extract config parameters
         self.bb_collision_tolerance = config.get('bb_collision_tolerance', 0.2)
@@ -61,8 +63,9 @@ class MultiAgentPursuitEvasionServer(Node):
         self.blue_cf_names = [f'blue_{i}' for i in range(1, self.n_blue + 1)]
         self.red_cf_names = [f'red_{i}' for i in range(1, self.n_red + 1)]
 
-        # Readiness tracking: [odom, body_rates, accel] for blue, [odom] for red
-        self.blue_ready = np.full((self.n_blue, 3), False, dtype=bool)
+        # Readiness tracking: [odom, body_rates, (accel)] for blue, [odom] for red
+        n_blue_ready_fields = 3 if require_accel else 2
+        self.blue_ready = np.full((self.n_blue, n_blue_ready_fields), False, dtype=bool)
         self.red_ready = np.full((self.n_red, 1), False, dtype=bool)
 
         # State tracking
@@ -91,6 +94,11 @@ class MultiAgentPursuitEvasionServer(Node):
         self.collision_check_interval = 5
         self.status_update_counter = 0
 
+        # Track which teams are ready for low-level control
+        self.teams_ready_for_low_level = {'evader': False, 'pursuer': False}
+
+        # Track if game over has been reported (to avoid spam)
+        self.game_over_reported = False
 
         # QoS: best effort, keep last 1 to drop old messages
         sensor_qos = QoSProfile(
@@ -115,11 +123,12 @@ class MultiAgentPursuitEvasionServer(Node):
                 partial(self._body_rates_callback, index=n, cf_states=self.cf_blue_states, ready=self.blue_ready, ready_index=1),
                 sensor_qos)
 
-            self.create_subscription(
-                LogDataGeneric,
-                f'/{cf_name}/accel',
-                partial(self._acceleration_callback, index=n, cf_states=self.cf_blue_states, ready=self.blue_ready, ready_index=2),
-                sensor_qos)
+            if self.require_accel:
+                self.create_subscription(
+                    LogDataGeneric,
+                    f'/{cf_name}/accel',
+                    partial(self._acceleration_callback, index=n, cf_states=self.cf_blue_states, ready=self.blue_ready, ready_index=2),
+                    sensor_qos)
 
         # Create subscriptions for red agents (odom only, no body_rates)
         for n in range(n_red):
@@ -146,6 +155,11 @@ class MultiAgentPursuitEvasionServer(Node):
         # Command service
         self.command_srv = self.create_service(Command, 'command', self._command_callback)
 
+        # ReadyForLowLevel service - teams call this when ready for low-level control
+        self.ready_srv = self.create_service(
+            ReadyForLowLevel, 'ready_for_low_level', self._ready_for_low_level_callback
+        )
+
         # Status publishing thread (bypasses ROS2 executor scheduling)
         self.publish_period = 1.0 / STATUS_PUBLISHER_FREQUENCY
         self.running = True
@@ -153,7 +167,7 @@ class MultiAgentPursuitEvasionServer(Node):
         self.publisher_thread.start()
 
         self.get_logger().info(
-            f'MAPE Server initialized: {n_blue} blue vs {n_red} red agents'
+            f'MAPE Server initialized: {n_blue} blue vs {n_red} red agents (require_accel={require_accel})'
         )
         self.get_logger().info(
             f'Collision tolerances: BB={self.bb_collision_tolerance}, RR={self.rr_collision_tolerance}, BR={self.rb_collision_tolerance}'
@@ -166,28 +180,55 @@ class MultiAgentPursuitEvasionServer(Node):
         """Handle command service requests."""
         if request.command == Command.Request.MAPE_CMD_OFF:
             self.get_logger().info('Command: OFF')
-            self.status = request.command
-            # Reset all agents to active when turning off
+            self.status = Status.MAPE_STATUS_OFF
+            # Reset all agents to active and ready states when turning off
             for state in self.cf_blue_states:
                 state.active = True
             for state in self.cf_red_states:
                 state.active = True
-        elif request.command == Command.Request.MAPE_CMD_INITIALIZE:
+            self.teams_ready_for_low_level = {'evader': False, 'pursuer': False}
+            self.game_over_reported = False
+        elif request.command == Command.Request.MAPE_CMD_TAKEOFF:
             if self._all_ready():
-                self.get_logger().info('Command: INITIALIZE accepted')
-                self.status = request.command
+                self.get_logger().info('Command: TAKEOFF accepted')
+                self.status = Status.MAPE_STATUS_TAKEOFF
+                # Reset low-level ready states for new takeoff
+                self.teams_ready_for_low_level = {'evader': False, 'pursuer': False}
             else:
-                self.get_logger().info('Command: INITIALIZE denied - agents not ready')
+                self.get_logger().info('Command: TAKEOFF denied - agents not ready')
                 self._log_ready_status()
         elif request.command == Command.Request.MAPE_CMD_RUN:
-            if self._all_ready():
+            if self.status != Status.MAPE_STATUS_INITIALIZED:
+                self.get_logger().info('Command: RUN denied - not in INITIALIZED state (drones must complete takeoff first)')
+            elif self._all_ready():
                 self.get_logger().info('Command: RUN accepted')
-                self.status = request.command
+                self.status = Status.MAPE_STATUS_RUNNING
             else:
                 self.get_logger().info('Command: RUN denied - agents not ready')
                 self._log_ready_status()
         else:
             self.get_logger().warn(f'Invalid command: {request.command}')
+
+        return response
+
+    def _ready_for_low_level_callback(self, request: ReadyForLowLevel.Request,
+                                       response: ReadyForLowLevel.Response):
+        """Handle team ready for low-level control notification."""
+        team_name = request.team_name.lower()
+
+        if team_name in self.teams_ready_for_low_level:
+            self.teams_ready_for_low_level[team_name] = True
+            self.get_logger().info(f'Team {team_name} ready for low-level control')
+
+            # Check if all teams are ready
+            if all(self.teams_ready_for_low_level.values()):
+                self.get_logger().info('All teams ready - switching to INITIALIZED state')
+                self.status = Status.MAPE_STATUS_INITIALIZED
+
+            response.success = True
+        else:
+            self.get_logger().warn(f'Unknown team name: {team_name}')
+            response.success = False
 
         return response
 
@@ -204,7 +245,7 @@ class MultiAgentPursuitEvasionServer(Node):
                     missing.append('odom')
                 if not self.blue_ready[i, 1]:
                     missing.append('body_rates')
-                if not self.blue_ready[i, 2]:
+                if self.require_accel and not self.blue_ready[i, 2]:
                     missing.append('accel')
                 self.get_logger().info(f'Blue {i} ({self.blue_cf_names[i]}) missing: {missing}')
         for i in range(self.n_red):
@@ -242,7 +283,7 @@ class MultiAgentPursuitEvasionServer(Node):
         """
         cf_states[index].angular_velocity = [
             msg.values[0] / 1000.0,
-            msg.values[1] / 1000.0,
+            -msg.values[1] / 1000.0,
             msg.values[2] / 1000.0
         ]
         ready[index, ready_index] = True
@@ -265,9 +306,9 @@ class MultiAgentPursuitEvasionServer(Node):
         """Convert EvaderState list to numpy array.
 
         Returns:
-            Array of shape (n_agents, 18): [pos(3), vel(3), quat(4), ang_vel(3), accel(3), active(1)]
+            Array of shape (n_agents, 17): [pos(3), vel(3), quat(4), ang_vel(3), accel(3), active(1)]
         """
-        np_states = np.zeros((len(states), 18))
+        np_states = np.zeros((len(states), 17))
         for idx, state in enumerate(states):
             np_states[idx, :] = np.array([
                 *state.position,          # 0:3
@@ -275,7 +316,7 @@ class MultiAgentPursuitEvasionServer(Node):
                 *state.attitude,          # 6:10 (quaternion)
                 *state.angular_velocity,  # 10:13
                 *state.acceleration,      # 13:16
-                float(state.active)       # 17
+                float(state.active)       # 16
             ])
         return np_states
 
@@ -306,6 +347,10 @@ class MultiAgentPursuitEvasionServer(Node):
 
         Uses vectorized meshgrid indexing to exclude self-collisions.
         """
+        # Don't process collisions if game is already over
+        if self.game_over_reported:
+            return
+
         blue_states = self._evader_states_to_np(self.cf_blue_states)
         red_states = self._pursuer_states_to_np(self.cf_red_states)
 
@@ -336,10 +381,10 @@ class MultiAgentPursuitEvasionServer(Node):
 
         # Boundary violations (blue only)
         out_of_bounds = (
-            (blue_pos[:, 2] < self.min_altitude) |
-            (blue_pos[:, 2] > self.max_altitude) |
             (np.abs(blue_pos[:, 0]) > self.boundary_size) |
-            (np.abs(blue_pos[:, 1]) > self.boundary_size)
+            (np.abs(blue_pos[:, 1]) > self.boundary_size) |
+            (blue_pos[:, 2] < self.min_altitude) |
+            (blue_pos[:, 2] > self.max_altitude)
         )
 
         blue_deactivated = np.where(bb_crash | br_crash | out_of_bounds)[0]
@@ -347,9 +392,39 @@ class MultiAgentPursuitEvasionServer(Node):
 
         # Update states
         for idx in blue_deactivated:
+            if self.cf_blue_states[idx].active:  # Only log if actually changing
+                reason = []
+                if bb_crash[idx]:
+                    reason.append("blue-blue collision")
+                if br_crash[idx]:
+                    reason.append("captured by red")
+                if out_of_bounds[idx]:
+                    reason.append("out of bounds")
+                self.get_logger().info(f'BLUE {idx} deactivated: {", ".join(reason)}')
             self.cf_blue_states[idx].active = False
         for idx in red_deactivated:
+            if self.cf_red_states[idx].active:  # Only log if actually changing
+                reason = []
+                if rr_crash[idx]:
+                    reason.append("red-red collision")
+                if rb_crash[idx]:
+                    reason.append("captured blue (mutual)")
+                self.get_logger().info(f'RED {idx} deactivated: {", ".join(reason)}')
             self.cf_red_states[idx].active = False
+
+        # Check for game over conditions (only report once)
+        if not self.game_over_reported and self.status == Status.MAPE_STATUS_RUNNING:
+            blue_alive = np.array([s.active for s in self.cf_blue_states])
+            red_alive = np.array([s.active for s in self.cf_red_states])
+
+            if not np.any(blue_alive):
+                self.get_logger().info('========== RED WINS! All blues eliminated ==========')
+                self.status = Status.MAPE_STATUS_RED_WON
+                self.game_over_reported = True
+            elif not np.any(red_alive) and np.any(blue_alive):
+                self.get_logger().info('========== BLUE WINS! All reds eliminated with blues surviving ==========')
+                self.status = Status.MAPE_STATUS_BLUE_WON
+                self.game_over_reported = True
 
         # Target reassignment: when a blue dies, reassign pursuing reds to closest alive blue
         if len(blue_deactivated) > 0:

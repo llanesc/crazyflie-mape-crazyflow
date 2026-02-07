@@ -62,7 +62,7 @@ public:
   void save(rviz_common::Config config) const override;
 
 protected Q_SLOTS:
-  void onInitializeButtonClicked();
+  void onTakeoffButtonClicked();
   void onRunButtonClicked();
   void onOffButtonClicked();
   void updateUI();
@@ -90,7 +90,7 @@ private:
   QLabel * status_value_label_;
 
   // Control buttons
-  QPushButton * initialize_button_;
+  QPushButton * takeoff_button_;
   QPushButton * run_button_;
   QPushButton * off_button_;
 
@@ -107,10 +107,13 @@ private:
   // UI update timer (50ms = 20Hz)
   QTimer * update_timer_;
 
-  // Status constants
+  // Status constants (must match Status.msg)
   static constexpr uint8_t STATUS_OFF = 0;
-  static constexpr uint8_t STATUS_INITIALIZED = 1;
-  static constexpr uint8_t STATUS_RUNNING = 2;
+  static constexpr uint8_t STATUS_TAKEOFF = 1;
+  static constexpr uint8_t STATUS_INITIALIZED = 2;
+  static constexpr uint8_t STATUS_RUNNING = 3;
+  static constexpr uint8_t STATUS_BLUE_WON = 4;
+  static constexpr uint8_t STATUS_RED_WON = 5;
 };
 
 }  // namespace mape_rviz_plugin

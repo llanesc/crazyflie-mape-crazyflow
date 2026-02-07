@@ -2,11 +2,34 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 package_name = 'multiagent_pursuit_evasion'
+
+
+def launch_mape_node(context):
+    """Launch the MAPE executor node with conditional arguments."""
+    require_accel = context.launch_configurations.get('require_accel', 'false')
+
+    args = ['-p', 'acmpc']
+    if require_accel.lower() == 'true':
+        args.append('--require-accel')
+
+    return [
+        Node(
+            package='multiagent_pursuit_evasion',
+            executable='main_executor',
+            name='mape_executor',
+            output='screen',
+            arguments=args,
+            additional_env={
+                'SCIPY_ARRAY_API': '1',
+            },
+        ),
+    ]
 
 
 def generate_launch_description():
@@ -18,6 +41,11 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                'require_accel',
+                default_value='false',
+                description='Require acceleration data from blue agents'
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     [
@@ -36,15 +64,6 @@ def generate_launch_description():
                     'backend': 'cpp',
                 }.items(),
             ),
-            Node(
-                package='multiagent_pursuit_evasion',
-                executable='main_executor',
-                name='mape_executor',
-                output='screen',
-                arguments=['-p', 'acmpc'],
-                additional_env={
-                    'SCIPY_ARRAY_API': '1',
-                },
-            ),
+            OpaqueFunction(function=launch_mape_node),
         ]
     )

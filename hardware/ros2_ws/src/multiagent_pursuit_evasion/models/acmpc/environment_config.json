@@ -1,13 +1,13 @@
 {
   "policy_type": "acmpc",
-  "experiment_name": "curriculum_training",
+  "experiment_name": "action_penalty",
   "n_pairs": 2,
   "drone_model": "cf2x_T350",
-  "pursuer_strategy": "AugProNav",
+  "pursuer_strategy": "TPN",
   "mpc_horizon": 2,
-  "mpc_dt": 0.01,
+  "mpc_dt": 0.02,
   "mpc_velocity_max": null,
-  "roll_pitch_max": 0.5,
+  "roll_pitch_max": 0.2,
   "yaw_max": 0.1,
   "cost_net_sizes": [
     256,
@@ -19,14 +19,14 @@
   ],
   "cost_net_activation": "relu",
   "value_activation": "relu",
-  "control_freq": 100,
+  "control_freq": 50,
   "mellinger_freq": 500,
   "sim_freq": 500,
-  "bb_collision_tolerance": 0.4,
-  "rr_collision_tolerance": 0.4,
-  "rb_collision_tolerance": 0.4,
-  "boundary_size": 3.0,
-  "min_altitude": 0.1,
+  "bb_collision_tolerance": 0.2,
+  "rr_collision_tolerance": 0.5,
+  "rb_collision_tolerance": 0.5,
+  "boundary_size": 4.0,
+  "min_altitude": 0.5,
   "max_altitude": 2.0,
   "spawn": {
     "blue": {
@@ -49,15 +49,25 @@
   "pursuit_gains": {
     "N_pronav_fb": 5.0,
     "N_pronav_ff": 1.0,
-    "velocity_closure_threshold": 0.1,
+    "velocity_closure_threshold": 0.5,
     "pp_k_pxy": 6.1624,
     "pp_k_vxy": 3.39,
     "pp_k_pz": 20.0,
     "pp_k_vz": 10.0,
-    "N_gain": 3.0,
-    "V_min": 0.3,
-    "K_v": 2.5
+    "N_gain": 5.0,
+    "V_min": 0.75,
+    "K_v": 3.0
   },
+  "mass": 0.0406,
+  "thrust_min": 0.1991,
+  "thrust_max": 0.5974,
+  "randomize_mass": false,
+  "randomize_inertia": false,
+  "mass_randomization_std": 0.003,
+  "inertia_randomization_std": 3e-06,
+  "enable_disturbance": false,
+  "disturbance_force_std": 0.01,
+  "disturbance_torque_std": 0.0001,
   "random_target_assignment": true,
   "observation_space": {
     "per_agent_obs_dim": 46,
@@ -74,15 +84,15 @@
     {
       "name": "Level 0",
       "params": {
-        "bb_collision_tolerance": 0.5,
+        "bb_collision_tolerance": 0.2,
         "rr_collision_tolerance": 0.5,
         "rb_collision_tolerance": 0.5
       },
       "spawn": {
         "blue": {
           "method": "deterministic",
-          "x": 2.0,
-          "teammate_spacing": 0.5,
+          "x": 3.0,
+          "teammate_spacing": 1.0,
           "initial_height": 1.0
         },
         "red": {
@@ -100,15 +110,101 @@
     {
       "name": "Level 1",
       "params": {
-        "bb_collision_tolerance": 0.4,
+        "bb_collision_tolerance": 0.2,
         "rr_collision_tolerance": 0.4,
         "rb_collision_tolerance": 0.4
       },
       "spawn": {
         "blue": {
           "method": "deterministic",
-          "x": 2.0,
+          "x": 3.0,
+          "teammate_spacing": 1.0,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "nominal_box",
+          "x": 0.0,
           "teammate_spacing": 0.5,
+          "initial_height": 1.0,
+          "x_half": 0.25,
+          "y_half": 0.25,
+          "z_half": 0.25
+        },
+        "min_spawn_distance": 0.45
+      }
+    },
+    {
+      "name": "Level 2",
+      "params": {
+        "bb_collision_tolerance": 0.2,
+        "rr_collision_tolerance": 0.4,
+        "rb_collision_tolerance": 0.4
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 3.0,
+          "teammate_spacing": 1.0,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "nominal_box",
+          "x": 0.0,
+          "teammate_spacing": 0.5,
+          "initial_height": 1.0,
+          "x_half": 0.35,
+          "y_half": 0.35,
+          "z_half": 0.35
+        },
+        "min_spawn_distance": 0.45
+      }
+    },
+    {
+      "name": "Level 3",
+      "params": {
+        "bb_collision_tolerance": 0.2,
+        "rr_collision_tolerance": 0.4,
+        "rb_collision_tolerance": 0.4,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.001,
+        "inertia_randomization_std": 5e-07
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 3.0,
+          "teammate_spacing": 1.0,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "nominal_box",
+          "x": 0.0,
+          "teammate_spacing": 0.5,
+          "initial_height": 1.0,
+          "x_half": 0.4,
+          "y_half": 0.4,
+          "z_half": 0.4
+        },
+        "min_spawn_distance": 0.5
+      }
+    },
+    {
+      "name": "Level 4",
+      "params": {
+        "bb_collision_tolerance": 0.2,
+        "rr_collision_tolerance": 0.4,
+        "rb_collision_tolerance": 0.4,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.002,
+        "inertia_randomization_std": 1e-06
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 3.0,
+          "teammate_spacing": 1.0,
           "initial_height": 1.0
         },
         "red": {
@@ -124,23 +220,96 @@
       }
     },
     {
-      "name": "Level 2",
+      "name": "Level 5",
       "params": {
-        "bb_collision_tolerance": 0.35,
-        "rr_collision_tolerance": 0.35,
-        "rb_collision_tolerance": 0.35
+        "bb_collision_tolerance": 0.2,
+        "rr_collision_tolerance": 0.4,
+        "rb_collision_tolerance": 0.4,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.002,
+        "inertia_randomization_std": 1e-06,
+        "enable_disturbance": true,
+        "disturbance_force_std": 0.005,
+        "disturbance_torque_std": 5e-05
       },
       "spawn": {
         "blue": {
           "method": "deterministic",
-          "x": 2.0,
-          "teammate_spacing": 0.5,
+          "x": 3.0,
+          "teammate_spacing": 1.0,
           "initial_height": 1.0
         },
         "red": {
           "method": "nominal_box",
           "x": 0.0,
+          "teammate_spacing": 0.7,
+          "initial_height": 1.0,
+          "x_half": 0.4,
+          "y_half": 0.4,
+          "z_half": 0.4
+        },
+        "min_spawn_distance": 0.5
+      }
+    },
+    {
+      "name": "Level 6",
+      "params": {
+        "bb_collision_tolerance": 0.2,
+        "rr_collision_tolerance": 0.35,
+        "rb_collision_tolerance": 0.35,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.002,
+        "inertia_randomization_std": 1e-06,
+        "enable_disturbance": true,
+        "disturbance_force_std": 0.005,
+        "disturbance_torque_std": 5e-05
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 3.0,
           "teammate_spacing": 1.0,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "nominal_box",
+          "x": 0.0,
+          "teammate_spacing": 0.7,
+          "initial_height": 1.0,
+          "x_half": 0.5,
+          "y_half": 0.5,
+          "z_half": 0.4
+        },
+        "min_spawn_distance": 0.5
+      }
+    },
+    {
+      "name": "Level 7",
+      "params": {
+        "bb_collision_tolerance": 0.2,
+        "rr_collision_tolerance": 0.3,
+        "rb_collision_tolerance": 0.3,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.002,
+        "inertia_randomization_std": 1e-06,
+        "enable_disturbance": true,
+        "disturbance_force_std": 0.005,
+        "disturbance_torque_std": 5e-05
+      },
+      "spawn": {
+        "blue": {
+          "method": "deterministic",
+          "x": 3.0,
+          "teammate_spacing": 1.0,
+          "initial_height": 1.0
+        },
+        "red": {
+          "method": "nominal_box",
+          "x": 0.0,
+          "teammate_spacing": 0.7,
           "initial_height": 1.0,
           "x_half": 0.6,
           "y_half": 0.6,
@@ -150,44 +319,61 @@
       }
     },
     {
-      "name": "Level 3",
+      "name": "Level 8",
       "params": {
-        "bb_collision_tolerance": 0.3,
-        "rr_collision_tolerance": 0.3,
-        "rb_collision_tolerance": 0.3
+        "bb_collision_tolerance": 0.2,
+        "rr_collision_tolerance": 0.2,
+        "rb_collision_tolerance": 0.2,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.002,
+        "inertia_randomization_std": 1e-06,
+        "enable_disturbance": true,
+        "disturbance_force_std": 0.005,
+        "disturbance_torque_std": 5e-05
       },
       "spawn": {
         "blue": {
           "method": "deterministic",
-          "x": 2.0,
-          "teammate_spacing": 0.5,
+          "x": 3.0,
+          "teammate_spacing": 1.0,
           "initial_height": 1.0
         },
         "red": {
           "method": "nominal_box",
           "x": 0.0,
-          "teammate_spacing": 1.5,
+          "teammate_spacing": 0.7,
           "initial_height": 1.0,
-          "x_half": 0.8,
-          "y_half": 0.8,
+          "x_half": 0.6,
+          "y_half": 0.6,
           "z_half": 0.4
         },
         "min_spawn_distance": 0.5
       }
     },
     {
-      "name": "Level 4",
+      "name": "Level 9",
       "params": {
         "bb_collision_tolerance": 0.2,
         "rr_collision_tolerance": 0.2,
-        "rb_collision_tolerance": 0.2
+        "rb_collision_tolerance": 0.2,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.002,
+        "inertia_randomization_std": 1e-06,
+        "enable_disturbance": true,
+        "disturbance_force_std": 0.03,
+        "disturbance_torque_std": 0.0003
       },
       "spawn": {
         "blue": {
-          "method": "deterministic",
-          "x": 2.0,
-          "teammate_spacing": 0.5,
-          "initial_height": 1.0
+          "method": "nominal_box",
+          "x": 3.0,
+          "teammate_spacing": 1.0,
+          "initial_height": 1.0,
+          "x_half": 0.1,
+          "y_half": 0.1,
+          "z_half": 0.1
         },
         "red": {
           "method": "box_random",

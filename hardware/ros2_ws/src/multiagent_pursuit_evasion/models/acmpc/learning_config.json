@@ -1,19 +1,24 @@
 {
-  "timesteps": 2500000,
-  "n_worlds": 64,
+  "timesteps": 2000000,
+  "n_worlds": 128,
   "rewards": {
-    "capture": -10.0,
+    "capture": -5.0,
     "escape": 20.0,
-    "red_crash": 50.0,
-    "blue_crash": -10.0,
-    "boundary": -10.0,
-    "alive": 0.05,
-    "pursuer_proximity": 0.1,
-    "pursuer_proximity_decay": 2.5
+    "red_crash": 30.0,
+    "blue_crash": -5.0,
+    "boundary": -5.0,
+    "alive": 0.0,
+    "pursuer_proximity": 0.3,
+    "pursuer_proximity_decay": 2.5,
+    "angle_coef": 0.01,
+    "velocity_coef": 0.1,
+    "action_coef": 0.5,
+    "action_smoothness_thrust": 5.0,
+    "action_smoothness_rpy": 1.0
   },
   "hyperparameters": {
     "rollouts": 256,
-    "learning_epochs": 8,
+    "learning_epochs": 4,
     "mini_batches": 4,
     "learning_rate": 0.0003,
     "learning_rate_scheduler": null,
@@ -30,11 +35,13 @@
     "kl_threshold": 0.0
   },
   "initial_log_std": [
-    -1.2,
-    -1.2,
-    -1.2,
-    -1.2
+    -0.5,
+    -0.5,
+    -1,
+    -1.3
   ],
   "episode_length_s": 20.0,
-  "start_time": "2026-01-25 03:37:14"
+  "start_time": "2026-02-04 22:40:41",
+  "resumed_from_run": null,
+  "initial_curriculum_level": null
 }
