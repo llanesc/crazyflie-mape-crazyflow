@@ -155,12 +155,12 @@ def config_to_env_config(config: dict, device: str | None = None) -> RedVsBlueEn
         kwargs["reward_blue_crash"] = rewards_cfg["blue_crash"]
     if "boundary" in rewards_cfg:
         kwargs["reward_boundary"] = rewards_cfg["boundary"]
-    if "alive" in rewards_cfg:
-        kwargs["reward_alive"] = rewards_cfg["alive"]
     if "pursuer_proximity" in rewards_cfg:
         kwargs["reward_pursuer_proximity"] = rewards_cfg["pursuer_proximity"]
     if "pursuer_proximity_decay" in rewards_cfg:
         kwargs["reward_pursuer_proximity_decay"] = rewards_cfg["pursuer_proximity_decay"]
+    if "rr_relative_velocity_coef" in rewards_cfg:
+        kwargs["reward_rr_relative_velocity_coef"] = rewards_cfg["rr_relative_velocity_coef"]
 
     # Angle and action penalties
     if "angle_coef" in rewards_cfg:
@@ -231,8 +231,10 @@ def get_training_config(config: dict) -> dict:
         "ratio_clip": training_cfg.get("ratio_clip", 0.2),
         "value_clip": training_cfg.get("value_clip", 0.2),
         "kl_threshold": training_cfg.get("kl_threshold", 0.0),
-        # Value preprocessor (optional)
+        # Preprocessors (optional)
         # Supported: "RunningStandardScaler" or None
+        "observation_preprocessor": training_cfg.get("observation_preprocessor", None),
+        "state_preprocessor": training_cfg.get("state_preprocessor", None),
         "value_preprocessor": training_cfg.get("value_preprocessor", None),
         # Learning rate scheduler (optional)
         # Supported: "KLAdaptiveLR", "StepLR", or None
@@ -260,6 +262,8 @@ def get_policy_config(config: dict, policy_type: str) -> dict:
         cost_net_sizes = policy_cfg.get("cost_net_sizes", [256, 256])
         value_net_sizes = policy_cfg.get("value_net_sizes", [256, 256])
         return {
+            # Cost formulation
+            "cost_type": policy_cfg.get("cost_type", "qp"),  # "qp" or "linear_ls"
             # MPC settings
             "mpc_horizon": policy_cfg.get("mpc_horizon", 2),
             "mpc_dt": policy_cfg.get("mpc_dt", 0.01),
@@ -275,6 +279,8 @@ def get_policy_config(config: dict, policy_type: str) -> dict:
             "value_activation": policy_cfg.get("value_activation", "relu"),
             # Exploration
             "initial_log_std": policy_cfg.get("initial_log_std", -1.2),
+            # LINEAR_LS specific
+            "pos_offset_max": policy_cfg.get("pos_offset_max", 1.0),
         }
     elif policy_type == "ffn":
         policy_net_sizes = policy_cfg.get("policy_net_sizes", [256, 256])

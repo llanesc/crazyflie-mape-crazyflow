@@ -59,7 +59,7 @@ def load_policy(
     config: dict,
     device: str = "cpu",
 ):
-    """Load a trained policy from checkpoint.
+    """Load a trained policy and observation preprocessor from checkpoint.
 
     Args:
         policy_type: Type of policy ("ffn" or "acmpc").
@@ -68,7 +68,8 @@ def load_policy(
         device: Device to load model on ("cpu" or "cuda").
 
     Returns:
-        Loaded policy in eval mode.
+        Tuple of (policy, obs_preprocessor). obs_preprocessor may be None if
+        no preprocessor was saved in the checkpoint.
 
     Raises:
         ValueError: If policy_type is not supported.
@@ -92,17 +93,13 @@ def load_policy(
         dtype=np.float32
     )
 
-    # Load drone params for action space bounds
+    # Load physical parameters from config, fallback to drone_params
     from drone_models.core import load_params
     drone_params = load_params("so_rpy", drone_model)
-    # thrust_min = float(drone_params["thrust_min"]) * 4
-    # thrust_max = float(drone_params["thrust_max"]) * 4
-    mass = float(drone_params["mass"]) + 4.9/1000.0
     gravity = float(np.abs(drone_params["gravity_vec"][2]))
-    # self.thrust_min = float(drone_params["thrust_min"]) * 4  # Per motor -> collective
-    # self.thrust_max = float(drone_params["thrust_max"]) * 4
-    thrust_min = mass * gravity * 0.5 
-    thrust_max = mass * gravity * 1.5
+    mass = config.get('mass', float(drone_params["mass"]))
+    thrust_min = config.get('thrust_min', mass * gravity * 0.5)
+    thrust_max = config.get('thrust_max', mass * gravity * 1.5)
 
     action_space = gymnasium.spaces.Box(
         low=np.array([-roll_pitch_max, -roll_pitch_max, -yaw_max, thrust_min], dtype=np.float32),
@@ -129,7 +126,10 @@ def load_policy(
     else:
         raise ValueError(f"Unsupported policy type: {policy_type}. Use 'ffn' or 'acmpc'.")
 
-    return policy
+    # Load observation preprocessor from checkpoint
+    obs_preprocessor = _load_obs_preprocessor(checkpoint_path, obs_dim, device)
+
+    return policy, obs_preprocessor
 
 
 def _load_ffn_policy(
@@ -182,6 +182,62 @@ def _load_ffn_policy(
     policy.to(device)
 
     return policy
+
+
+def _load_obs_preprocessor(
+    checkpoint_path: Path,
+    obs_dim: int,
+    device: str,
+):
+    """Load observation preprocessor from SKRL checkpoint.
+
+    The checkpoint stores preprocessor state under
+    checkpoint[agent_key]['observation_preprocessor']. We reconstruct a
+    PartialRunningStandardScaler with the correct size and load its state.
+
+    Args:
+        checkpoint_path: Path to checkpoint file.
+        obs_dim: Observation dimension.
+        device: Computation device.
+
+    Returns:
+        Loaded preprocessor in eval mode, or None if not found.
+    """
+    from crazyflie_mape_crazyflow.preprocessors import PartialRunningStandardScaler
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    if not isinstance(checkpoint, dict):
+        return None
+
+    # Find the first agent key with an observation_preprocessor
+    preprocessor_state = None
+    for key in checkpoint:
+        if key.startswith('_'):
+            continue
+        agent_data = checkpoint[key]
+        if isinstance(agent_data, dict) and 'observation_preprocessor' in agent_data:
+            preprocessor_state = agent_data['observation_preprocessor']
+            break
+
+    if preprocessor_state is None:
+        return None
+
+    # The state_dict contains _scale_indices and _skip_indices as buffers,
+    # so we can reconstruct the preprocessor with the right skip_dims
+    skip_indices = preprocessor_state.get('_skip_indices', torch.tensor([]))
+    skip_dims = skip_indices.tolist() if len(skip_indices) > 0 else None
+
+    preprocessor = PartialRunningStandardScaler(
+        size=obs_dim,
+        skip_dims=skip_dims,
+        device=device,
+    )
+    preprocessor.load_state_dict(preprocessor_state)
+    preprocessor.eval()
+    preprocessor.to(device)
+
+    return preprocessor
 
 
 def _extract_policy_state_dict(checkpoint: dict) -> dict:
@@ -248,7 +304,7 @@ def _load_acmpc_policy(
         ImportError: If leap_c or acados is not available.
     """
     try:
-        from crazyflie_mape_crazyflow.policies.leap_c_shared_policy import LeapCSharedGaussianPolicy
+        from crazyflie_mape_crazyflow.policies.leap_c_shared_policy_linear_ls import LeapCSharedGaussianPolicyLinearLS as LeapCSharedGaussianPolicy
     except ImportError as e:
         raise ImportError(
             "ACMPC policy requires leap_c and acados to be installed. "
@@ -264,6 +320,7 @@ def _load_acmpc_policy(
     roll_pitch_max = config.get('roll_pitch_max', 0.5)
     yaw_max = config.get('yaw_max', 0.1)
     drone_model = config.get('drone_model', 'cf2x_T350')
+    pos_offset_max = config.get('pos_offset_max', 0.25)
 
     # Load physical parameters from config, fallback to drone-models
     from drone_models.core import load_params
@@ -299,6 +356,7 @@ def _load_acmpc_policy(
         num_threads=4,
         velocity_max=velocity_max,
         activation=activation,
+        pos_offset_max=pos_offset_max,
     )
 
     # Load checkpoint
@@ -314,12 +372,14 @@ def _load_acmpc_policy(
     return policy
 
 
-def infer_action(policy, observation: np.ndarray) -> np.ndarray:
+def infer_action(policy, observation: np.ndarray, obs_preprocessor=None) -> np.ndarray:
     """Run deterministic inference on a policy.
 
     Args:
         policy: Loaded policy with compute() method.
-        observation: Observation array, shape (batch, obs_dim) or (obs_dim,).
+        observation: Raw observation array, shape (batch, obs_dim) or (obs_dim,).
+        obs_preprocessor: Optional observation preprocessor (e.g. PartialRunningStandardScaler).
+            If provided, normalizes the observation before passing to the policy.
 
     Returns:
         Mean action array, shape (batch, action_dim) or (action_dim,).
@@ -332,8 +392,18 @@ def infer_action(policy, observation: np.ndarray) -> np.ndarray:
 
     with torch.no_grad():
         obs_tensor = torch.tensor(observation, dtype=torch.float32)
-        inputs = {"states": obs_tensor}
-        mean_actions, _, _ = policy.compute(inputs)
+
+        # Extract raw MPC state before normalization (for ACMPC policies)
+        raw_mpc_state = policy._extract_state(obs_tensor) if hasattr(policy, '_extract_state') else None
+
+        # Apply observation preprocessor if available
+        if obs_preprocessor is not None:
+            obs_tensor = obs_preprocessor(obs_tensor)
+
+        inputs = {"observations": obs_tensor}
+        if raw_mpc_state is not None:
+            inputs["mpc_state"] = raw_mpc_state
+        mean_actions, _ = policy.compute(inputs)
 
         if isinstance(mean_actions, torch.Tensor):
             actions = mean_actions.numpy()

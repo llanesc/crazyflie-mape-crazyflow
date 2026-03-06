@@ -40,7 +40,8 @@ from tqdm import tqdm
 from crazyflie_mape_crazyflow.envs import RedVsBlueEnv, RedVsBlueEnvConfig, RescaleActionWrapper
 from crazyflie_mape_crazyflow.envs.spawn import create_spawn_fn_from_config
 from crazyflie_mape_crazyflow.policies import (
-    LeapCSharedGaussianPolicy,
+    LeapCSharedGaussianPolicyQP,
+    LeapCSharedGaussianPolicyLinearLS,
     SharedCritic,
 )
 
@@ -244,8 +245,9 @@ Example:
                         help="Disable domain randomization (mass/inertia) regardless of level config")
     parser.add_argument("--no-disturbance", action="store_true",
                         help="Disable external force/torque disturbances regardless of level config")
-    parser.add_argument("--override-mass", type=float, default=None,
-                        help="Override simulation mass [kg] (policy still uses trained mass for model mismatch testing)")
+    parser.add_argument("--override-mass", type=float, nargs='+', default=None,
+                        help="Override blue simulation mass [kg]. Single value: all blue drones. "
+                             "Multiple values: per-drone (e.g., 0.0406 0.0306 for blue 1 and blue 2)")
 
     # Evaluation settings
     parser.add_argument("--n-episodes", type=int, default=100, help="Number of episodes to evaluate")
@@ -278,6 +280,17 @@ Example:
     # Observation saving
     parser.add_argument("--save-obs", action="store_true",
                         help="Save observations to CSV files in {run_dir}/obs_data/ep{N:03d}_sim.csv")
+
+    # Trajectory visualization
+    parser.add_argument("--trajectory", action="store_true",
+                        help="Draw trajectory lines for each drone (blue for evaders, red for pursuers)")
+
+    # Screenshot
+    parser.add_argument("--screenshot-episode", type=int, default=None,
+                        help="Save a high-res PNG of the last frame of the given episode number (0-indexed)")
+    parser.add_argument("--screenshot-resolution", type=int, nargs=2, default=[3840, 2160],
+                        metavar=("W", "H"),
+                        help="Screenshot resolution in pixels (default: 3840 2160)")
 
     return parser.parse_args()
 
@@ -338,7 +351,7 @@ def load_configs(checkpoint_path: Path) -> tuple[dict, dict | None]:
 
 def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_fps=30, record_path=None,
              cam_distance=8.0, cam_azimuth=90.0, cam_elevation=-25.0, cam_lookat=(0.0, 0.0, 1.0), verbose=False,
-             obs_save_dir=None):
+             obs_save_dir=None, screenshot_episode=None, screenshot_path=None):
     """Run evaluation episodes and collect metrics.
 
     Args:
@@ -355,6 +368,8 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
         cam_lookat: Camera lookat point (x, y, z).
         verbose: Print per-episode outcomes for debugging.
         obs_save_dir: Directory to save observation CSV files (None to disable).
+        screenshot_episode: Episode number (1-indexed) to capture as a high-res PNG.
+        screenshot_path: Output path for the screenshot PNG.
 
     Returns:
         Dictionary of evaluation metrics.
@@ -384,11 +399,16 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     # Recording setup
     frames = [] if record_path else None
     recording = record_path is not None
+    screenshot_rendering = screenshot_episode is not None
 
     episodes_completed = 0
-    render_interval = max(1, env.cfg.control_freq // render_fps) if (render or recording) else None
+    needs_render = render or recording or screenshot_rendering
+    render_interval = max(1, env.cfg.control_freq // render_fps) if needs_render else None
     sim_dt = 1.0 / env.cfg.control_freq
     render_dt = render_interval * sim_dt if render else None
+
+    # Screenshot tracking
+    screenshot_saved = False
 
     # Camera settings to apply on first render
     camera_initialized = False
@@ -419,8 +439,8 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     # Initial reset
     obs_dict, info = env.reset()
 
-    # Print initial positions (world 0)
-    initial_pos = np.asarray(raw_env.sim.data.states.pos[0])
+    # Print and cache initial positions (world 0)
+    initial_pos = np.asarray(raw_env.sim.data.states.pos[0]).copy()
     print(f"\n  Starting evaluation - Initial Positions (world 0):")
     for i in range(n_blue):
         pos = initial_pos[i]
@@ -440,7 +460,7 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     episode_times = [] if obs_save_dir is not None else None
     current_episode_for_obs = 1
 
-    policy_time = 0.0
+    policy_times_ms = []
     env_time = 0.0
 
     while episodes_completed < n_episodes:
@@ -465,7 +485,7 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                     print(f"      Obs shape: {obs.shape}, Obs[0][:10]: {obs[0][:10] if len(obs.shape) > 1 else obs[:10]}")
                     print(f"      Action (world 0): {actions[agent_name][0] if len(actions[agent_name].shape) > 1 else actions[agent_name]}")
                     print(f"      log_std: {log_std.cpu().numpy()}")
-        policy_time += time.perf_counter() - t0
+        policy_times_ms.append((time.perf_counter() - t0) * 1000.0)
 
         # Collect observations for saving
         if episode_observations is not None and n_worlds == 1:
@@ -594,6 +614,32 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             world_steps[world_idx] = 0
             world_rewards[world_idx] = 0.0
 
+            # Update cached initial positions for world 0 (auto-reset already happened)
+            if world_idx == 0 and recording:
+                initial_pos = np.asarray(raw_env.sim.data.states.pos[0]).copy()
+
+            # Screenshot: render immediately when target episode ends (0-indexed)
+            # render() consumes saved pre-reset state (final drone positions + trajectory)
+            if (screenshot_rendering and not screenshot_saved
+                    and world_idx == 0 and episodes_completed > screenshot_episode):
+                if not camera_initialized:
+                    env.render()
+                    if raw_env.sim.viewer is not None and raw_env.sim.viewer.viewer is not None:
+                        cam = raw_env.sim.viewer.viewer.cam
+                        cam.distance = cam_distance
+                        cam.azimuth = cam_azimuth
+                        cam.elevation = cam_elevation
+                        cam.lookat[:] = cam_lookat
+                    camera_initialized = True
+                screenshot_frame = env.render()
+                if screenshot_frame is not None and screenshot_path:
+                    from PIL import Image
+                    img = Image.fromarray(screenshot_frame)
+                    img.save(screenshot_path)
+                    print(f"\nScreenshot saved: {screenshot_path} "
+                          f"({screenshot_frame.shape[1]}x{screenshot_frame.shape[0]})")
+                    screenshot_saved = True
+
         # Render/record if requested
         if render_interval and (global_step % render_interval) == 0:
             if not camera_initialized:
@@ -634,7 +680,36 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                 if frame is not None:
                     frame = frame.copy()
                     font = cv2.FONT_HERSHEY_SIMPLEX
-                    lines = [f"Episode: {episodes_completed}/{n_episodes}", f"Step: {global_step}"]
+
+                    # Gather overlay data
+                    vel = np.asarray(raw_env.sim.data.states.vel[0])
+                    speeds = np.linalg.norm(vel, axis=-1)
+                    blue_alive = np.asarray(raw_env.blue_alive[0])
+                    red_alive = np.asarray(raw_env.red_alive[0])
+
+                    if total_episodes_completed > 0:
+                        blue_win_rate = blue_wins / total_episodes_completed * 100
+                        red_win_rate = red_wins / total_episodes_completed * 100
+                    else:
+                        blue_win_rate = red_win_rate = 0.0
+
+                    lines = [
+                        f"Episode: {episodes_completed}/{n_episodes}  Step: {world_steps[0]}",
+                        f"Win Rates - Blue: {blue_win_rate:.1f}%  Red: {red_win_rate:.1f}%",
+                    ]
+                    # Initial positions
+                    for i in range(n_blue):
+                        p = initial_pos[i]
+                        lines.append(f"B{i} init: ({p[0]:+.2f}, {p[1]:+.2f}, {p[2]:+.2f})")
+                    for i in range(len(initial_pos) - n_blue):
+                        p = initial_pos[n_blue + i]
+                        lines.append(f"R{i} init: ({p[0]:+.2f}, {p[1]:+.2f}, {p[2]:+.2f})")
+                    # Live status
+                    blue_status = "  ".join(f"B{i}:{'O' if blue_alive[i] else 'X'} {speeds[i]:.2f}" for i in range(n_blue))
+                    red_status = "  ".join(f"R{i}:{'O' if red_alive[i] else 'X'} {speeds[n_blue + i]:.2f}" for i in range(len(red_alive)))
+                    lines.append(f"Blue: {blue_status}")
+                    lines.append(f"Red:  {red_status}")
+
                     y_offset = 20
                     for line in lines:
                         (text_w, text_h), _ = cv2.getTextSize(line, font, 0.5, 1)
@@ -655,7 +730,8 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 
     # Close progress bar and print final timing
     pbar.close()
-    print(f"\n  Final timing: policy={policy_time*1000:.1f}ms, env={env_time*1000:.1f}ms, total_steps={global_step}")
+    policy_times_arr = np.array(policy_times_ms)
+    print(f"\n  Policy inference: {policy_times_arr.mean():.3f} ± {policy_times_arr.std():.3f} ms/step  (n={len(policy_times_arr)}, total_steps={global_step})")
 
     # Trim to exact number of episodes
     all_episode_lengths = all_episode_lengths[:n_episodes]
@@ -673,6 +749,10 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     # Compute statistics
     metrics = {
         "n_episodes": n_episodes,
+        "policy_inference_ms": {
+            "mean": float(policy_times_arr.mean()),
+            "std": float(policy_times_arr.std()),
+        },
         "episode_length": {
             "mean": float(np.mean(all_episode_lengths)),
             "std": float(np.std(all_episode_lengths)),
@@ -752,6 +832,9 @@ def main():
     # Get MPC velocity constraint
     mpc_velocity_max = env_config.get("mpc_velocity_max", None)
 
+    # Get cost type (qp or linear_ls)
+    cost_type = env_config.get("cost_type", "qp")  # Default to qp for backwards compatibility
+
     # Get cost network activation
     cost_net_activation = env_config.get("cost_net_activation", "relu")
 
@@ -764,6 +847,7 @@ def main():
     print(f"Environment configuration:")
     print(f"  - n_pairs: {n_pairs}")
     print(f"  - pursuer_strategy: {pursuer_strategy}")
+    print(f"  - cost_type: {cost_type}")
     print(f"  - mpc_horizon: {mpc_horizon}")
     print(f"  - mpc_velocity_max: {mpc_velocity_max}")
     print(f"  - cost_net_sizes: [{hidden_dim}, {hidden_dim}]")
@@ -831,11 +915,9 @@ def main():
         disturbance_torque_std=env_config.get("disturbance_torque_std", 1e-4),
         # Rewards (from learning_config if available, else defaults)
         reward_capture=learning_config.get("rewards", {}).get("capture", -30.0) if learning_config else -30.0,
-        reward_escape=learning_config.get("rewards", {}).get("escape", 20.0) if learning_config else 20.0,
         reward_red_crash=learning_config.get("rewards", {}).get("red_crash", 20.0) if learning_config else 20.0,
         reward_blue_crash=learning_config.get("rewards", {}).get("blue_crash", -20.0) if learning_config else -20.0,
         reward_boundary=learning_config.get("rewards", {}).get("boundary", -5.0) if learning_config else -5.0,
-        reward_alive=learning_config.get("rewards", {}).get("alive", 0.1) if learning_config else 0.1,
         reward_pursuer_proximity=learning_config.get("rewards", {}).get("pursuer_proximity", 0.5) if learning_config else 0.5,
         reward_pursuer_proximity_decay=learning_config.get("rewards", {}).get("pursuer_proximity_decay", 2.0) if learning_config else 2.0,
         # Episode length
@@ -907,11 +989,24 @@ def main():
         env_cfg.enable_disturbance = False
         print("  ** Disturbances DISABLED (--no-disturbance) **")
 
-    # Override simulation mass if requested (for model mismatch testing)
+    # Override blue/evader simulation mass if requested (for model mismatch testing)
+    # Red/pursuers keep cfg.mass unchanged
     if args.override_mass is not None:
-        original_mass = env_cfg.mass
-        env_cfg.mass = args.override_mass
-        print(f"  ** Simulation mass OVERRIDDEN: {original_mass:.4f} -> {args.override_mass:.4f} kg (policy uses {mass:.4f} kg) **")
+        original_mass = env_cfg.blue_mass
+        if len(args.override_mass) == 1:
+            override_mass = args.override_mass[0]
+            env_cfg.blue_mass = override_mass
+            print(f"  ** Blue simulation mass OVERRIDDEN: {original_mass} -> {override_mass:.4f} kg (policy uses {mass:.4f} kg, red uses {env_cfg.mass:.4f} kg) **")
+        else:
+            if len(args.override_mass) != env_cfg.n_blue:
+                raise ValueError(
+                    f"--override-mass got {len(args.override_mass)} values but n_blue={env_cfg.n_blue}. "
+                    f"Provide 1 value (all blue) or {env_cfg.n_blue} values (per-drone)."
+                )
+            override_mass = args.override_mass
+            env_cfg.blue_mass = override_mass
+            mass_strs = ', '.join(f'{m:.4f}' for m in override_mass)
+            print(f"  ** Blue simulation mass OVERRIDDEN per-drone: {original_mass} -> [{mass_strs}] kg (policy uses {mass:.4f} kg, red uses {env_cfg.mass:.4f} kg) **")
 
     # Print final configuration for diagnostic purposes
     print(f"\nFinal environment configuration:")
@@ -948,6 +1043,15 @@ def main():
 
         record_path = run_dir / video_filename
 
+    # Setup screenshot
+    screenshot_episode = args.screenshot_episode
+    screenshot_path = None
+    if screenshot_episode is not None:
+        run_name = run_dir.name
+        level_str = f"_level_{args.level}" if args.level is not None else ""
+        screenshot_path = run_dir / f"{args.experiment}_{run_name}{level_str}_ep{screenshot_episode}.png"
+        print(f"  Screenshot: episode {screenshot_episode} → {screenshot_path}")
+
     # Setup observation saving directory
     if args.save_obs:
         if args.n_worlds != 1:
@@ -956,13 +1060,22 @@ def main():
 
     # Create environment
     # Use rgb_array mode for recording, human mode for live rendering
-    if args.record:
+    if args.record or screenshot_episode is not None:
         render_mode = "rgb_array"
     elif args.render:
         render_mode = "human"
     else:
         render_mode = None
     env = RedVsBlueEnv(cfg=env_cfg, render_mode=render_mode, spawn_fn=spawn_fn)
+
+    # Set high resolution for screenshots
+    if screenshot_episode is not None:
+        sw, sh = args.screenshot_resolution
+        env.set_render_resolution(sw, sh)
+
+    # Enable trajectory visualization if requested
+    if args.trajectory and render_mode is not None:
+        env.enable_trajectory(enabled=True, subsample=5)
 
     # Wrap with action rescaling (policy outputs [-1, 1], env expects physical bounds)
     env = RescaleActionWrapper(env)
@@ -980,28 +1093,52 @@ def main():
     mpc_dt = env_config.get("mpc_dt", 0.01)
 
     # Create policy (same architecture as training)
-    # Note: roll_pitch_max, yaw_max, and cost_net_activation were loaded earlier
+    # Note: roll_pitch_max, yaw_max, cost_net_activation, and cost_type were loaded earlier
     # Use env_cfg thrust limits for consistency with environment's action space
-    shared_policy = LeapCSharedGaussianPolicy(
-        observation_space=sample_obs_space,
-        action_space=sample_action_space,
-        device=device,
-        mpc_horizon=mpc_horizon,
-        mpc_dt=mpc_dt,
-        hidden_dim=hidden_dim,
-        roll_pitch_max=env_cfg.roll_pitch_max,
-        yaw_max=env_cfg.yaw_max,
-        thrust_min=env_cfg.thrust_min,
-        thrust_max=env_cfg.thrust_max,
-        mass=mass,
-        gravity=env_cfg.gravity,
-        drone_model=drone_model,
-        velocity_max=mpc_velocity_max,
-        activation=cost_net_activation,
-    )
+    if cost_type == "linear_ls":
+        # Get pos_offset_max from config (for LINEAR_LS policy)
+        pos_offset_max = env_config.get("pos_offset_max", 1.0)
+        shared_policy = LeapCSharedGaussianPolicyLinearLS(
+            observation_space=sample_obs_space,
+            action_space=sample_action_space,
+            device=device,
+            mpc_horizon=mpc_horizon,
+            mpc_dt=mpc_dt,
+            hidden_dim=hidden_dim,
+            roll_pitch_max=env_cfg.roll_pitch_max,
+            yaw_max=env_cfg.yaw_max,
+            thrust_min=env_cfg.thrust_min,
+            thrust_max=env_cfg.thrust_max,
+            mass=mass,
+            gravity=env_cfg.gravity,
+            drone_model=drone_model,
+            velocity_max=mpc_velocity_max,
+            activation=cost_net_activation,
+            pos_offset_max=pos_offset_max,
+        )
+    elif cost_type == "qp":
+        shared_policy = LeapCSharedGaussianPolicyQP(
+            observation_space=sample_obs_space,
+            action_space=sample_action_space,
+            device=device,
+            mpc_horizon=mpc_horizon,
+            mpc_dt=mpc_dt,
+            hidden_dim=hidden_dim,
+            roll_pitch_max=env_cfg.roll_pitch_max,
+            yaw_max=env_cfg.yaw_max,
+            thrust_min=env_cfg.thrust_min,
+            thrust_max=env_cfg.thrust_max,
+            mass=mass,
+            gravity=env_cfg.gravity,
+            drone_model=drone_model,
+            velocity_max=mpc_velocity_max,
+            activation=cost_net_activation,
+        )
+    else:
+        raise ValueError(f"Unknown cost_type: {cost_type}. Must be 'qp' or 'linear_ls'")
 
     # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     # SKRL saves models in various formats depending on version
     # Try different loading strategies
@@ -1072,6 +1209,8 @@ def main():
         cam_lookat=tuple(args.cam_lookat),
         verbose=args.verbose,
         obs_save_dir=obs_save_dir,
+        screenshot_episode=screenshot_episode,
+        screenshot_path=screenshot_path,
     )
 
     # Print results

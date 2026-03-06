@@ -5,12 +5,16 @@ that integrates with the leap-c library for differentiable MPC.
 
 State: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw] (12D)
 Control: [roll, pitch, yaw, thrust] (4D)
+
+Supports two cost formulations:
+- QP: J = 0.5 * x'Qx + p'x (default)
+- LINEAR_LS: J = 0.5 * ||Vx*x + Vu*u - y_ref||_W^2 (decoupled W and y_ref)
 """
 
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -24,7 +28,8 @@ from leap_c.ocp.acados.parameters import AcadosParameter, AcadosParameterManager
 from leap_c.ocp.acados.planner import AcadosPlanner
 from leap_c.ocp.acados.torch import AcadosDiffMpcCtx, AcadosDiffMpcTorch
 
-from .quadrotor_ocp import (
+# Import from qp by default
+from .quadrotor_ocp_qp import (
     NX,
     NU,
     Q_STATE_SIZE,
@@ -32,10 +37,10 @@ from .quadrotor_ocp import (
     P_X_SIZE,
     P_U_SIZE,
     QuadrotorAcadosParamInterface,
-    create_quadrotor_params,
-    export_parametric_ocp,
-    get_learnable_param_dim,
 )
+
+# Cost type literal for type hints
+CostType = Literal["qp", "linear_ls"]
 
 
 class QuadrotorHoverInitializer(AcadosDiffMpcInitializer):
@@ -138,6 +143,7 @@ class QuadrotorPlannerConfig:
         T_horizon: Total horizon time [s].
         dt: Integration timestep [s].
         param_interface: "global" for same params all stages, "stagewise" for varying.
+        cost_type: Cost formulation - "qp" (J=0.5*x'Qx + p'x) or "linear_ls" (J=0.5*||y-y_ref||_W^2).
         n_batch_max: Maximum batch size for parallel solves.
         num_threads: Number of parallel threads for batch solver.
         drone_model: Drone model identifier for parameter loading.
@@ -154,6 +160,7 @@ class QuadrotorPlannerConfig:
     dt: float = 0.01  # 100Hz MPC
     T_horizon: float = None  # Will be set in __post_init__
     param_interface: QuadrotorAcadosParamInterface = "stagewise"
+    cost_type: CostType = "qp"  # "qp" or "linear_ls"
     n_batch_max: int = 4096
     num_threads: int = 8
     drone_model: str = "cf2x_L250"
@@ -169,6 +176,8 @@ class QuadrotorPlannerConfig:
     def __post_init__(self):
         if self.T_horizon is None:
             self.T_horizon = self.N_horizon * self.dt
+        if self.cost_type not in ("qp", "linear_ls"):
+            raise ValueError(f"cost_type must be 'qp' or 'linear_ls', got '{self.cost_type}'")
 
 
 class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
@@ -211,6 +220,25 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         # Load drone physical parameters from drone-models
         self.drone_params = load_params("so_rpy", self.cfg.drone_model)
 
+        # Import correct OCP module based on cost type
+        if self.cfg.cost_type == "qp":
+            from .quadrotor_ocp_qp import (
+                create_quadrotor_params_qp as create_quadrotor_params,
+                export_parametric_ocp_qp as export_parametric_ocp,
+                get_learnable_param_dim_qp as get_learnable_param_dim,
+            )
+            ocp_name = "quadrotor_so_rpy_euler_qp"
+        else:  # linear_ls
+            from .quadrotor_ocp_linear_ls import (
+                create_quadrotor_params_linear_ls as create_quadrotor_params,
+                export_parametric_ocp_linear_ls as export_parametric_ocp,
+                get_learnable_param_dim_linear_ls as get_learnable_param_dim,
+            )
+            ocp_name = "quadrotor_so_rpy_euler_linear_ls"
+
+        # Store get_learnable_param_dim for later use
+        self._get_learnable_param_dim = get_learnable_param_dim
+
         # Create parameters
         params = (
             create_quadrotor_params(
@@ -237,7 +265,7 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         # Create OCP
         ocp = export_parametric_ocp(
             param_manager=param_manager,
-            name="quadrotor_so_rpy_euler",
+            name=ocp_name,
             N_horizon=self.cfg.N_horizon,
             T_horizon=self.cfg.T_horizon,
             dt=self.cfg.dt,
@@ -316,7 +344,7 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         Returns:
             Total number of learnable parameters.
         """
-        return get_learnable_param_dim(self.cfg.N_horizon, self.cfg.param_interface)
+        return self._get_learnable_param_dim(self.cfg.N_horizon, self.cfg.param_interface)
 
     def get_default_params(self, batch_size: int = 1) -> np.ndarray:
         """Get default parameter values.

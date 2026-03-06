@@ -11,6 +11,7 @@
 [submodule "hardware/ros2_ws/src/crazyswarm2"]
 	path = hardware/ros2_ws/src/crazyswarm2
 	url = https://github.com/llanesc/crazyswarm2.git
+	branch = crazysim
 [submodule "external/skrl"]
 	path = external/skrl
 	url = git@github.com:llanesc/skrl.git

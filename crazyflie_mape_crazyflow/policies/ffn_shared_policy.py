@@ -153,8 +153,10 @@ class FFNSharedGaussianPolicy(GaussianMixin, Model):
 
         # Get log std
         log_std = self.log_std_parameter
-        if self._g_clip_log_std:
-            log_std = torch.clamp(log_std, self._g_min_log_std, self._g_max_log_std)
+        if getattr(self, '_g_clip_log_std', False):
+            min_val = getattr(self, '_g_min_log_std', -20.0)
+            max_val = getattr(self, '_g_max_log_std', 2.0)
+            log_std = torch.clamp(log_std, min_val, max_val)
 
         # Store for distribution computation
         self._log_std = log_std

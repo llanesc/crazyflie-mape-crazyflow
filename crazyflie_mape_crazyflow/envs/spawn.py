@@ -314,14 +314,14 @@ def create_spawn_fn_from_config(spawn_config: dict) -> SpawnFn:
     Returns:
         Spawn function with signature (key, N, B, R) -> (blue_pos, red_pos).
     """
-    blue_config = spawn_config.get("blue", {"method": "deterministic", "x": 2.0})
-    red_config = spawn_config.get("red", {"method": "deterministic", "x": 0.0})
+    blue_config = spawn_config.get("blue", {"method": "deterministic", "x": 0.0})
+    red_config = spawn_config.get("red", {"method": "deterministic", "x": 3.0})
 
     blue_method, blue_params = _create_team_spawn_fn_from_config(
-        blue_config, default_x=2.0, default_x_min=1.5, default_x_max=2.5
+        blue_config, default_x=0.0, default_x_min=-0.5, default_x_max=0.5
     )
     red_method, red_params = _create_team_spawn_fn_from_config(
-        red_config, default_x=0.0, default_x_min=-0.5, default_x_max=0.5
+        red_config, default_x=3.0, default_x_min=2.5, default_x_max=3.5
     )
 
     # Extract parameters as explicit variables to avoid dict unpacking in JIT

@@ -15,7 +15,15 @@ from pathlib import Path
 # =============================================================================
 # Set to None to use base config values, or an integer (0, 1, 2, ...) to use
 # parameters from that curriculum level (e.g., collision tolerances)
-CURRICULUM_LEVEL = 3  # e.g., 0, 1, 2, or None for base config
+CURRICULUM_LEVEL = 9  # e.g., 0, 1, 2, or None for base config
+# =============================================================================
+
+# =============================================================================
+# COLLISION TOLERANCES - Manual overrides (set to None to use config/curriculum)
+# =============================================================================
+BB_COLLISION_TOLERANCE = 0.2   # Blue-Blue collision distance (meters), or None
+RR_COLLISION_TOLERANCE = 0.2   # Red-Red collision distance (meters), or None
+RB_COLLISION_TOLERANCE = 0.2   # Red-Blue (capture) distance (meters), or None
 # =============================================================================
 
 from ament_index_python.packages import get_package_share_directory
@@ -72,13 +80,17 @@ def run_evader_process(config: dict, checkpoint_path: str, policy_type: str):
 
     # Load policy in this process
     try:
-        policy = load_policy(
+        policy, obs_preprocessor = load_policy(
             policy_type=policy_type,
             checkpoint_path=checkpoint_path,
             config=config,
             device='cpu',
         )
         logger.info(f"Evader policy loaded: {policy_type}")
+        if obs_preprocessor is not None:
+            logger.info("Observation preprocessor loaded from checkpoint")
+        else:
+            logger.warn("No observation preprocessor found in checkpoint")
     except Exception as e:
         logger.error(f"Failed to load evader policy: {e}")
         rclpy.shutdown()
@@ -88,6 +100,7 @@ def run_evader_process(config: dict, checkpoint_path: str, policy_type: str):
         config=config,
         policy=policy,
         policy_type=policy_type,
+        obs_preprocessor=obs_preprocessor,
     )
 
     executor = executors.SingleThreadedExecutor()
@@ -348,6 +361,16 @@ def main():
     # Apply curriculum level if specified
     if CURRICULUM_LEVEL is not None:
         config = apply_curriculum_level(config, CURRICULUM_LEVEL)
+
+    # Apply manual collision tolerance overrides (take priority over curriculum)
+    for key, value in [
+        ('bb_collision_tolerance', BB_COLLISION_TOLERANCE),
+        ('rr_collision_tolerance', RR_COLLISION_TOLERANCE),
+        ('rb_collision_tolerance', RB_COLLISION_TOLERANCE),
+    ]:
+        if value is not None:
+            config[key] = value
+            print(f"  Override {key}: {value}")
 
     n_blue = config['n_pairs']
     n_red = config['n_pairs']

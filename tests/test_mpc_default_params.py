@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from crazyflie_mape_crazyflow.leap_c import QuadrotorPlanner, QuadrotorPlannerConfig
-from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp import (
+from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp_external import (
     Q_STATE_SIZE,
     Q_CTRL_SIZE,
     P_X_SIZE,

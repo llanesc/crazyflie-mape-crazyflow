@@ -28,14 +28,14 @@ from drone_models.core import load_params
 # Initial positions [x, y, z] for each drone after takeoff
 # Blue team (evaders)
 BLUE_INITIAL_POS = np.array([
-    [3.0, -0.5, 1.0],   # blue_1: [x, y, z]
-    [3.0, 0.5, 1.0],   # blue_2: [x, y, z]
+    [0.02, -0.57, 1.01],   # blue_1: [x, y, z]
+    [0.01, 0.41, 0.90],   # blue_2: [x, y, z]
 ])
 
 # Red team (pursuers)
 RED_INITIAL_POS = np.array([
-    [-0.04, -0.27, 0.79],  # red_1: [x, y, z]
-    [0.19, 0.28, 1.33],  # red_2: [x, y, z]
+    [3.48, -0.65, 0.81],  # red_1: [x, y, z]
+    [2.58, 0.25, 0.95],  # red_2: [x, y, z]
 ])
 
 # Takeoff transition thresholds
@@ -55,6 +55,28 @@ HOVER_KI_Z = 6.0         # Integral gain for Z-axis hover
 HOVER_INTEGRAL_CAP = 1.0  # Cap on integral term (m*s) to prevent windup
 
 # =============================================================================
+
+
+def quat_to_rotmat(x: float, y: float, z: float, w: float) -> np.ndarray:
+    """Convert quaternion to 3x3 rotation matrix, flattened row-major.
+
+    Args:
+        x, y, z, w: Quaternion components.
+
+    Returns:
+        Flattened rotation matrix of shape (9,).
+    """
+    # Pre-compute products
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+
+    R = np.array([
+        1 - 2 * (yy + zz), 2 * (xy - wz),     2 * (xz + wy),
+        2 * (xy + wz),     1 - 2 * (xx + zz), 2 * (yz - wx),
+        2 * (xz - wy),     2 * (yz + wx),     1 - 2 * (xx + yy),
+    ], dtype=np.float32)
+    return R
 
 
 def quat_to_euler(x: float, y: float, z: float, w: float) -> tuple:
@@ -341,17 +363,16 @@ class TeamBase(Node):
         return np_states
 
     def states_to_np_extended(self, states: list) -> np.ndarray:
-        """Convert EvaderState list to numpy array with angular velocity (13D).
+        """Convert EvaderState list to numpy array with rotation matrix and body rates (19D).
 
-        Converts quaternion attitude to euler angles for control.
+        Converts quaternion attitude to flattened rotation matrix.
 
         Returns:
-            Array of shape (n_agents, 13): [pos(3), vel(3), rpy(3), ang_vel(3), active(1)]
+            Array of shape (n_agents, 19): [pos(3), vel(3), rotmat_flat(9), body_rates(3), active(1)]
         """
-        np_states = np.zeros((len(states), 13))
+        np_states = np.zeros((len(states), 19))
         for idx, state in enumerate(states):
-            # Convert quaternion to euler
-            rpy = quat_to_euler(
+            rotmat_flat = quat_to_rotmat(
                 state.attitude[0],
                 state.attitude[1],
                 state.attitude[2],
@@ -360,9 +381,9 @@ class TeamBase(Node):
             np_states[idx, :] = np.array([
                 *state.position,          # 0:3
                 *state.velocity,          # 3:6
-                *rpy,                     # 6:9
-                *state.angular_velocity,  # 9:12
-                float(state.active)       # 12
+                *rotmat_flat,             # 6:15
+                *state.angular_velocity,  # 15:18
+                float(state.active)       # 18
             ])
         return np_states
 
@@ -972,18 +993,21 @@ class EvaderTeam(TeamBase):
     a loaded policy (FFN or ACMPC) for action inference.
     """
 
-    def __init__(self, config: dict, policy=None, policy_type: str = "ffn"):
+    def __init__(self, config: dict, policy=None, policy_type: str = "ffn",
+                 obs_preprocessor=None):
         """Initialize evader team.
 
         Args:
             config: Environment configuration dictionary.
             policy: Loaded policy object with compute() method.
             policy_type: Type of policy ("ffn" or "acmpc").
+            obs_preprocessor: Optional observation preprocessor from training checkpoint.
         """
         super().__init__('evader_team', 'evader', config)
 
         self.policy = policy
         self.policy_type = policy_type
+        self.obs_preprocessor = obs_preprocessor
         self.pursuer_targets = []
         self.pursuer_target_one_hot = None
         self.initial_pos = None
@@ -1076,11 +1100,13 @@ class EvaderTeam(TeamBase):
 
         elif status == Status.MAPE_STATUS_TAKEOFF or status == Status.MAPE_STATUS_INITIALIZED:
             # Use PD control for hover (TAKEOFF included for brief transition period)
-            blue_10d = np.concatenate([blue_states_np[:, :9], blue_states_np[:, 12:13]], axis=-1)
+            # _pid_control expects 10D: [pos(3), vel(3), rpy(3), active(1)]
+            # Extract RPY from rotation matrix for PID controller
+            blue_10d = self._extract_pid_states(blue_states_np)
             return self._pid_control(blue_10d, self.initial_pos, np.zeros_like(self.initial_pos))
 
         elif status == Status.MAPE_STATUS_RUNNING:
-            active_agents = (blue_states_np[:, 12] == 1)
+            active_agents = (blue_states_np[:, 18] == 1)
             inactive_agents = ~active_agents
 
             # Reset settled state and integral for agents that become active again
@@ -1117,8 +1143,7 @@ class EvaderTeam(TeamBase):
                         # Use current position to slow down
                         inactive_target_pos[i] = inactive_pos[i]
 
-                blue_10d = np.concatenate([blue_states_np[inactive_agents, :9],
-                                           blue_states_np[inactive_agents, 12:13]], axis=-1)
+                blue_10d = self._extract_pid_states(blue_states_np[inactive_agents])
                 controls_inactive = self._pid_control(
                     blue_10d, inactive_target_pos, np.zeros_like(inactive_target_pos),
                     agent_indices=inactive_indices
@@ -1149,48 +1174,68 @@ class EvaderTeam(TeamBase):
                     if vel_mag < self.settling_velocity_threshold:
                         self.agent_settled[i] = True
                         self.settled_pos[i] = blue_states_np[i, 0:3]
-            blue_10d = np.concatenate([blue_states_np[:, :9], blue_states_np[:, 12:13]], axis=-1)
+            blue_10d = self._extract_pid_states(blue_states_np)
             return self._pid_control(blue_10d, hover_pos, np.zeros_like(hover_pos))
 
         return np.zeros((len(blue_states), 4))
 
+    def _extract_pid_states(self, blue_states_ext: np.ndarray) -> np.ndarray:
+        """Extract 10D PID states from 19D extended blue states.
+
+        Converts rotation matrix back to RPY for the PID controller.
+
+        Args:
+            blue_states_ext: shape (n, 19) = [pos(3), vel(3), rotmat_flat(9), body_rates(3), active(1)]
+
+        Returns:
+            Array of shape (n, 10) = [pos(3), vel(3), rpy(3), active(1)]
+        """
+        n = blue_states_ext.shape[0]
+        pid_states = np.zeros((n, 10), dtype=np.float32)
+        pid_states[:, 0:3] = blue_states_ext[:, 0:3]   # pos
+        pid_states[:, 3:6] = blue_states_ext[:, 3:6]   # vel
+        # Convert rotation matrix to RPY
+        for i in range(n):
+            R = blue_states_ext[i, 6:15].reshape(3, 3)
+            sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+            pitch = np.arctan2(-R[2, 0], sy)
+            roll = np.arctan2(R[2, 1], R[2, 2])
+            yaw = np.arctan2(R[1, 0], R[0, 0])
+            pid_states[i, 6:9] = [roll, pitch, yaw]
+        pid_states[:, 9] = blue_states_ext[:, 18]       # active
+        return pid_states
+
     def _build_observation(self, blue_states: np.ndarray, red_states: np.ndarray,
                             agent_idx: int) -> np.ndarray:
-        """Build 46D observation for a single agent matching env._get_observations().
+        """Build observation for a single agent matching env._get_observations().
 
         Observation format (for n_pairs=2):
-        - Own state: pos(3) + vel(3) + rpy(3) + rpy_rates(3) = 12
+        - Own state: pos(3) + vel(3) + rotmat_flat(9) + body_rates(3) = 18
         - Own one-hot: n_blue = 2
         - All blue: n_blue * (pos(3) + vel(3) + alive(1)) = 14
         - All red: n_red * (pos(3) + vel(3) + alive(1)) = 14
         - Target assignments: n_red * n_blue = 4
 
-        Total: 12 + 2 + 14 + 14 + 4 = 46D
+        Total: 18 + 2 + 14 + 14 + 4 = 52D
 
         Args:
-            blue_states: Blue agent states, shape (n_blue, 13).
+            blue_states: Blue agent states, shape (n_blue, 19).
+                [pos(3), vel(3), rotmat_flat(9), body_rates(3), active(1)]
             red_states: Red agent states, shape (n_red, 10).
+                [pos(3), vel(3), rpy(3), active(1)]
             agent_idx: Index of the agent building observation for.
 
         Returns:
-            Observation array of shape (46,).
+            Observation array of shape (52,).
         """
         n_blue = blue_states.shape[0]
         n_red = red_states.shape[0]
 
-        blue_alive = blue_states[:, 12]
+        blue_alive = blue_states[:, 18]
         red_alive = red_states[:, 9]
 
-        # Own state (12D)
-        pos = blue_states[agent_idx, 0:3]
-        vel = blue_states[agent_idx, 3:6]
-        rpy = blue_states[agent_idx, 6:9]
-        ang_vel = blue_states[agent_idx, 9:12]
-        # ang_vel[1] = -ang_vel[1]  # Negate yaw rate to match env convention
-        # Convert body angular velocity to Euler rates
-        rpy_rates = self.ang_vel_to_rpy_rates(rpy[None, :], ang_vel[None, :])[0]
-
-        own_state = np.concatenate([pos, vel, rpy, rpy_rates])  # 12D
+        # Own state (18D): pos + vel + rotmat_flat + body_rates
+        own_state = blue_states[agent_idx, 0:18]
 
         # Own one-hot masked by alive (n_blue D)
         own_one_hot = np.zeros(n_blue)
@@ -1229,7 +1274,7 @@ class EvaderTeam(TeamBase):
         target_one_hot_masked = (self.pursuer_target_one_hot * red_alive[:, None]).flatten()
 
         obs = np.concatenate([
-            own_state,                          # 12
+            own_state,                          # 18
             own_one_hot,                        # n_blue
             np.array(blue_states_flat),         # n_blue * 7
             np.array(red_states_flat),          # n_red * 7
@@ -1243,7 +1288,7 @@ class EvaderTeam(TeamBase):
         """Compute control using learned policy.
 
         Args:
-            blue_states: Blue agent states, shape (n_blue, 13).
+            blue_states: Blue agent states, shape (n_blue, 19).
             red_states: Red agent states, shape (n_red, 10).
             active_agents: Boolean mask of active agents, shape (n_blue,).
 
@@ -1254,16 +1299,28 @@ class EvaderTeam(TeamBase):
 
         active_indices = np.where(active_agents)[0]
         n_active = len(active_indices)
+        n = self.n_blue
+        obs_dim = 18 + n + n * 7 + n * 7 + n * n
 
         # Build observations for active agents
-        observations = np.zeros((n_active, 46), dtype=np.float32)
+        observations = np.zeros((n_active, obs_dim), dtype=np.float32)
         for i, agent_idx in enumerate(active_indices):
             observations[i] = self._build_observation(blue_states, red_states, agent_idx)
 
         # Run policy inference (deterministic, no sampling)
         with torch.no_grad():
             obs_tensor = torch.tensor(observations, dtype=torch.float32, device='cpu')
+
+            # Extract raw MPC state before normalization (for ACMPC policies)
+            raw_mpc_state = self.policy._extract_state(obs_tensor) if hasattr(self.policy, '_extract_state') else None
+
+            # Apply observation preprocessor (normalization) if available
+            if self.obs_preprocessor is not None:
+                obs_tensor = self.obs_preprocessor(obs_tensor)
+
             inputs = {"observations": obs_tensor}
+            if raw_mpc_state is not None:
+                inputs["mpc_state"] = raw_mpc_state
             mean_actions, _ = self.policy.compute(inputs)
 
             if isinstance(mean_actions, torch.Tensor):

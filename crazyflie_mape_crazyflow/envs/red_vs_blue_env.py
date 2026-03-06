@@ -211,7 +211,6 @@ def _jit_compute_rewards(
     reward_red_crash: float,
     reward_capture: float,
     reward_boundary: float,
-    reward_alive: float,
     reward_pursuer_proximity: float,
     reward_pursuer_proximity_decay: float,
     reward_angle_coef: float,
@@ -223,6 +222,8 @@ def _jit_compute_rewards(
     reward_action_smoothness_thrust: float,
     reward_action_smoothness_rpy: float,
     hover_thrust: float,
+    red_vel: jnp.ndarray,
+    reward_rr_relative_velocity_coef: float,
     n_pairs: int,
 ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
     """JIT-compiled reward computation.
@@ -233,9 +234,24 @@ def _jit_compute_rewards(
     """
     reward_bb = (bb_collision.astype(jnp.float32) * blue_alive.astype(jnp.float32)).sum(axis=1) * reward_blue_crash / 2
     reward_rr = rr_collision.astype(jnp.float32).sum(axis=1) * reward_red_crash / 2
+
+    # Red-red collision closing velocity bonus: rewards high-energy head-on collisions
+    R = rr_collision.shape[1]
+    red_pos_i = red_pos[:, :, None, :]  # (N, R, 1, 3)
+    red_pos_j = red_pos[:, None, :, :]  # (N, 1, R, 3)
+    r_vec = red_pos_i - red_pos_j  # (N, R, R, 3)
+    r_dist = jnp.linalg.norm(r_vec, axis=-1, keepdims=True)  # (N, R, R, 1)
+    r_hat = r_vec / jnp.maximum(r_dist, 1e-6)  # (N, R, R, 3) unit LOS vector
+    red_vel_i = red_vel[:, :, None, :]  # (N, R, 1, 3)
+    red_vel_j = red_vel[:, None, :, :]  # (N, 1, R, 3)
+    v_rel = red_vel_i - red_vel_j  # (N, R, R, 3)
+    closing_vel = jnp.maximum(-jnp.sum(v_rel * r_hat, axis=-1), 0.0)  # (N, R, R)
+    pair_collided = rr_collision[:, :, None] & rr_collision[:, None, :]  # (N, R, R)
+    pair_collided = pair_collided & ~jnp.eye(R, dtype=jnp.bool_)[None, :, :]
+    reward_rr = reward_rr + reward_rr_relative_velocity_coef * (closing_vel * pair_collided).sum(axis=(1, 2)) / 2
+
     reward_br = rb_collision.astype(jnp.float32).sum(axis=1) * reward_capture
     reward_fence = (out_of_bounds.astype(jnp.float32) * blue_alive.astype(jnp.float32)).sum(axis=1) * reward_boundary
-    reward_alive_total = blue_alive.astype(jnp.float32).sum(axis=1) * reward_alive
     pursuer_dist = jnp.linalg.norm(red_pos[:, 0] - red_pos[:, 1], axis=-1)
     reward_proximity = reward_pursuer_proximity * jnp.exp(-reward_pursuer_proximity_decay * pursuer_dist)
 
@@ -273,17 +289,20 @@ def _jit_compute_rewards(
     rpy_diff = action_diff[..., :3]  # (N, B, 3)
     rpy_smoothness_penalty = reward_action_smoothness_rpy * ((rpy_diff ** 2).sum(axis=-1) * blue_alive.astype(jnp.float32)).sum(axis=1)
 
-    total_reward = (reward_bb + reward_rr + reward_br + reward_fence + reward_alive_total + reward_proximity
-                    - angle_penalty - velocity_penalty - ground_proximity_penalty
-                    - energy_penalty - thrust_smoothness_penalty - rpy_smoothness_penalty) / n_pairs
-
+    total_reward = (reward_bb + reward_rr + reward_br + reward_fence + reward_proximity
+                    - angle_penalty 
+                    - velocity_penalty
+                    - energy_penalty 
+                    - thrust_smoothness_penalty 
+                    - rpy_smoothness_penalty
+                    # - ground_proximity_penalty
+                    ) / n_pairs
     # Return individual components (normalized by n_pairs to match total)
     components = {
         "bb_collision": reward_bb / n_pairs,
         "rr_collision": reward_rr / n_pairs,
         "rb_collision": reward_br / n_pairs,
         "boundary": reward_fence / n_pairs,
-        "alive": reward_alive_total / n_pairs,
         "proximity": reward_proximity / n_pairs,
         "angle_penalty": -angle_penalty / n_pairs,
         "velocity_penalty": -velocity_penalty / n_pairs,
@@ -695,6 +714,15 @@ class RedVsBlueEnv(gym.Env):
         self.episode_steps = np.zeros(self.cfg.n_worlds, dtype=np.int32)
         self._max_episode_steps = self.cfg.max_episode_steps
 
+        # Trajectory tracking for visualization
+        self._trajectory_enabled = False
+        # Per-drone trajectory: list of (n_drones, 3) position snapshots
+        self._trajectories: list[np.ndarray] = []
+        self._trajectory_subsample = 5  # record every N steps
+        self._trajectory_step_counter = 0
+        self._trajectory_pending_clear = False
+        self._pre_reset_render_state = None
+
     def _init_simulator(self):
         """Initialize Crazyflow simulator."""
         self.sim = Sim(
@@ -708,10 +736,20 @@ class RedVsBlueEnv(gym.Env):
             device=self.cfg.device,
         )
 
-        # Override mass in drone params
+        # Override mass per-team: red uses cfg.mass, blue uses cfg.blue_mass
+        B = self.cfg.n_blue
         params = self.sim.data.params
-        params = params.replace(mass=params.mass.at[:, :].set(self.cfg.mass))
+        blue_mass = self.cfg.blue_mass
+        if isinstance(blue_mass, (list, np.ndarray)):
+            blue_mass_arr = jnp.array(blue_mass).reshape(1, B, 1)
+        else:
+            blue_mass_arr = blue_mass
+        params = params.replace(
+            mass=params.mass.at[:, :B].set(blue_mass_arr).at[:, B:].set(self.cfg.mass)
+        )
         self.sim.data = self.sim.data.replace(params=params)
+        # Also update default_data so sim.reset() preserves per-team mass
+        self.sim.default_data = self.sim.default_data.replace(params=params)
 
         # Apply domain randomization if configured
         self._apply_domain_randomization()
@@ -724,15 +762,25 @@ class RedVsBlueEnv(gym.Env):
         if self.cfg.enable_disturbance:
             self._enable_disturbance()
 
-        # Calculate hover RPM from first_principles model parameters
+        # Calculate per-team hover RPMs from first_principles model parameters
         fp_params = load_params("first_principles", self.cfg.drone_model)
         rpm2thrust = fp_params["rpm2thrust"]  # [c0, c1, c2] where thrust = c0 + c1*rpm + c2*rpm^2
-        thrust_per_motor_hover = self.cfg.mass * self.cfg.gravity / 4
-        # Solve quadratic: c2*rpm^2 + c1*rpm + (c0 - thrust) = 0
         a = rpm2thrust[2]
         b = rpm2thrust[1]
-        c = rpm2thrust[0] - thrust_per_motor_hover
-        self.hover_rpm = float((-b + np.sqrt(b**2 - 4*a*c)) / (2*a))
+
+        # Blue hover RPM (uses blue_mass override)
+        blue_mass = self.cfg.blue_mass
+        if isinstance(blue_mass, (list, np.ndarray)):
+            blue_mass_arr = np.array(blue_mass)
+            c_blue = rpm2thrust[0] - blue_mass_arr * self.cfg.gravity / 4
+            self.blue_hover_rpm = (-b + np.sqrt(b**2 - 4*a*c_blue)) / (2*a)  # (B,) array
+        else:
+            c_blue = rpm2thrust[0] - blue_mass * self.cfg.gravity / 4
+            self.blue_hover_rpm = float((-b + np.sqrt(b**2 - 4*a*c_blue)) / (2*a))
+
+        # Red hover RPM (uses cfg.mass)
+        c_red = rpm2thrust[0] - self.cfg.mass * self.cfg.gravity / 4
+        self.red_hover_rpm = float((-b + np.sqrt(b**2 - 4*a*c_red)) / (2*a))
 
     def _apply_domain_randomization(self, mask: jnp.ndarray | None = None):
         """Apply domain randomization to mass and/or inertia.
@@ -749,7 +797,17 @@ class RedVsBlueEnv(gym.Env):
             mass_noise = jax.random.normal(
                 key, (self.cfg.n_worlds, self.cfg.n_drones, 1)
             ) * self.cfg.mass_randomization_std
-            randomized_masses = self.cfg.mass + mass_noise
+            # Per-team base mass: blue uses blue_mass, red uses mass
+            B = self.cfg.n_blue
+            blue_mass = self.cfg.blue_mass
+            if isinstance(blue_mass, (list, np.ndarray)):
+                blue_mass_val = jnp.array(blue_mass).reshape(1, B, 1)
+            else:
+                blue_mass_val = blue_mass
+            base_mass = jnp.zeros((1, self.cfg.n_drones, 1))
+            base_mass = base_mass.at[:, :B].set(blue_mass_val)
+            base_mass = base_mass.at[:, B:].set(self.cfg.mass)
+            randomized_masses = base_mass + mass_noise
             randomize_mass(self.sim, randomized_masses, mask)
 
         if self.cfg.randomize_inertia:
@@ -813,12 +871,12 @@ class RedVsBlueEnv(gym.Env):
         n = self.cfg.n_pairs
 
         # Per-agent observation dimension:
-        # - Own state: pos(3) + vel(3) + rpy(3) + ang_vel(3) = 12
+        # - Own state: pos(3) + vel(3) + rotmat_flat(9) + body_rates(3) = 18
         # - Own one-hot: n_blue
         # - All blue states + alive: n_blue * 7
         # - All red states + alive: n_red * 7
         # - Red target assignments: n_red * n_blue
-        self.obs_dim = 12 + n + n * 7 + n * 7 + n * n
+        self.obs_dim = 18 + n + n * 7 + n * 7 + n * n
 
         # MPC state dimension for internal use (Euler dynamics)
         self.mpc_state_dim = 12  # [pos(3), rpy(3), vel(3), drpy(3)]
@@ -854,7 +912,8 @@ class RedVsBlueEnv(gym.Env):
 
         # Shared state for centralized critic
         # All blue states + all red states + target assignments
-        shared_dim = n * 10 + n * 10 + n * n
+        # Per drone: pos(3) + vel(3) + rotmat_flat(9) + body_rates(3) + alive(1) = 19
+        shared_dim = n * 19 + n * 19 + n * n
         self.shared_observation_space = spaces.Box(
             -np.inf, np.inf, (shared_dim,), dtype=np.float32
         )
@@ -864,6 +923,84 @@ class RedVsBlueEnv(gym.Env):
             agent: self.shared_observation_space
             for agent in self.possible_agents
         }
+
+        # Pre-compute binary/one-hot dimension indices for partial normalization
+        self._obs_binary_dims = self._compute_obs_binary_dims(n)
+        self._state_binary_dims = self._compute_state_binary_dims(n)
+
+    @staticmethod
+    def _compute_obs_binary_dims(n: int) -> list[int]:
+        """Return observation dimension indices that are binary/one-hot.
+
+        Layout: own_state(18) | ally_one_hot(B) | blue_states(B*7) | red_states(R*7) | target_one_hot(R*B)
+        With B = R = n:
+          - ally_one_hot:       dims [18, 18+n)
+          - alive flag per blue: every 7th dim in blue_states block (offset 6 within each agent's 7)
+          - alive flag per red:  every 7th dim in red_states block
+          - target_one_hot:     dims [18+n+n*7+n*7, end)
+        """
+        B = R = n
+        dims: list[int] = []
+        offset = 18
+
+        # ally one-hot: B dims
+        dims.extend(range(offset, offset + B))
+        offset += B
+
+        # blue states: B * (pos(3) + vel(3) + alive(1))
+        for i in range(B):
+            dims.append(offset + i * 7 + 6)  # alive flag
+        offset += B * 7
+
+        # red states: R * (pos(3) + vel(3) + alive(1))
+        for i in range(R):
+            dims.append(offset + i * 7 + 6)  # alive flag
+        offset += R * 7
+
+        # target one-hot: R * B dims
+        dims.extend(range(offset, offset + R * B))
+
+        return sorted(dims)
+
+    @staticmethod
+    def _compute_state_binary_dims(n: int) -> list[int]:
+        """Return shared state dimension indices that are binary/one-hot.
+
+        Layout: blue_states(B*19) | red_states(R*19) | target_one_hot(R*B)
+        Per drone: pos(3) + vel(3) + rotmat_flat(9) + body_rates(3) + alive(1) = 19
+        With B = R = n:
+          - alive flag per blue: offset 18 within each drone's 19
+          - alive flag per red:  offset 18 within each drone's 19
+          - target_one_hot:     dims [B*19+R*19, end)
+        """
+        B = R = n
+        dims: list[int] = []
+        offset = 0
+
+        # blue states: B * (pos(3) + vel(3) + rotmat(9) + body_rates(3) + alive(1))
+        for i in range(B):
+            dims.append(offset + i * 19 + 18)  # alive flag
+        offset += B * 19
+
+        # red states: R * (pos(3) + vel(3) + rotmat(9) + body_rates(3) + alive(1))
+        for i in range(R):
+            dims.append(offset + i * 19 + 18)  # alive flag
+        offset += R * 19
+
+        # target one-hot: R * B dims
+        dims.extend(range(offset, offset + R * B))
+
+        return sorted(dims)
+
+    @property
+    def obs_binary_dims(self) -> list[int]:
+        """Observation indices that are binary/one-hot (should skip normalization)."""
+        return self._obs_binary_dims
+
+    @property
+    def state_binary_dims(self) -> list[int]:
+        """Shared state indices that are binary/one-hot (should skip normalization)."""
+        return self._state_binary_dims
 
     def _init_state_tensors(self):
         """Initialize state tracking tensors."""
@@ -901,10 +1038,40 @@ class RedVsBlueEnv(gym.Env):
         self.prev_blue_vel = jnp.zeros((N, B, 3))
         self.prev_blue_accel = jnp.zeros((N, B, 3))
 
+        # Cached blue state for _get_info() MPC state
+        self._cached_blue_rpy_rates = None
+
     @property
     def num_envs(self) -> int:
         """Number of parallel environments."""
         return self.cfg.n_worlds
+
+    def enable_trajectory(self, enabled: bool = True, subsample: int = 5):
+        """Enable or disable trajectory tracking for visualization.
+
+        Args:
+            enabled: Whether to record positions each step.
+            subsample: Record every N steps to limit marker count.
+        """
+        self._trajectory_enabled = enabled
+        self._trajectory_subsample = subsample
+        self.clear_trajectory()
+
+    def set_render_resolution(self, width: int, height: int):
+        """Set render resolution. Must be called before the first render().
+
+        Args:
+            width: Render width in pixels.
+            height: Render height in pixels.
+        """
+        self._render_width = width
+        self._render_height = height
+
+    def clear_trajectory(self):
+        """Clear stored trajectory data."""
+        self._trajectories = []
+        self._trajectory_step_counter = 0
+        self._trajectory_pending_clear = False
 
     def reset(
         self,
@@ -933,6 +1100,10 @@ class RedVsBlueEnv(gym.Env):
 
         # Reset episode counters (per-world)
         self.episode_steps = np.zeros(self.cfg.n_worlds, dtype=np.int32)
+
+        # Clear trajectory on reset
+        if self._trajectory_enabled:
+            self.clear_trajectory()
 
         # Reset termination event tracking (rates, normalized by n_worlds)
         self.last_termination_events = {
@@ -1000,8 +1171,15 @@ class RedVsBlueEnv(gym.Env):
         # Combine positions for all drones
         all_pos = jnp.concatenate([blue_pos, red_pos], axis=1)
 
-        # Initialize rotor velocities at hover RPM for all drones
-        all_rotor_vel = jnp.full((N, B + R, 4), self.hover_rpm)
+        # Initialize rotor velocities at per-team hover RPMs
+        if isinstance(self.blue_hover_rpm, np.ndarray):
+            blue_rotor_vel = jnp.broadcast_to(
+                jnp.array(self.blue_hover_rpm)[None, :, None], (N, B, 4)
+            )
+        else:
+            blue_rotor_vel = jnp.full((N, B, 4), self.blue_hover_rpm)
+        red_rotor_vel = jnp.full((N, R, 4), self.red_hover_rpm)
+        all_rotor_vel = jnp.concatenate([blue_rotor_vel, red_rotor_vel], axis=1)
 
         # Reset velocities and orientation
         all_vel = jnp.zeros((N, B + R, 3))
@@ -1080,10 +1258,15 @@ class RedVsBlueEnv(gym.Env):
         all_blue_pos, all_red_pos = self._spawn_fn(spawn_key, N, B, R)
         new_pos = jnp.concatenate([all_blue_pos, all_red_pos], axis=1)  # (N, B+R, 3)
 
-        # Set rotor velocities to hover RPM
-        hover_rpm = jnp.broadcast_to(
-            jnp.array(self.hover_rpm), self.sim.data.states.rotor_vel.shape
-        )
+        # Set per-team rotor velocities to hover RPM
+        if isinstance(self.blue_hover_rpm, np.ndarray):
+            blue_rpm = jnp.broadcast_to(
+                jnp.array(self.blue_hover_rpm)[None, :, None], (N, B, 4)
+            )
+        else:
+            blue_rpm = jnp.full((N, B, 4), self.blue_hover_rpm)
+        red_rpm = jnp.full((N, R, 4), self.red_hover_rpm)
+        hover_rpm = jnp.concatenate([blue_rpm, red_rpm], axis=1)
 
         # Update sim state with spawn positions and hover RPM using leaf_replace
         states = leaf_replace(
@@ -1118,6 +1301,19 @@ class RedVsBlueEnv(gym.Env):
 
         # Step simulation
         self.sim.step(n_steps=self.cfg.sim_steps_per_control)
+
+        # Record trajectory for visualization
+        if self._trajectory_enabled:
+            # Deferred clear: wait until next episode starts recording so
+            # the final render of the previous episode still shows the trajectory
+            if self._trajectory_pending_clear:
+                self.clear_trajectory()
+                self._trajectory_pending_clear = False
+            self._trajectory_step_counter += 1
+            if self._trajectory_step_counter % self._trajectory_subsample == 0:
+                self._trajectories.append(
+                    np.asarray(self.sim.data.states.pos[0]).copy()
+                )
 
         # Check collisions and update alive status
         bb_collision, rr_collision, rb_collision, out_of_bounds = self._check_collisions()
@@ -1192,7 +1388,26 @@ class RedVsBlueEnv(gym.Env):
         # Use episode_terminated (not per-agent terminated) for reset decision
         done_mask = episode_terminated | truncated[sample_agent]
         if done_mask.any():
+            # Save pre-reset render state for trajectory visualization
+            # so the first render after auto-reset shows drones at their
+            # final positions rather than at new spawn positions
+            if self._trajectory_enabled and done_mask[0]:
+                final_pos = np.asarray(self.sim.data.states.pos[0]).copy()
+                # Append final position so trajectory extends to the drone
+                self._trajectories.append(final_pos)
+                self._pre_reset_render_state = {
+                    'pos': final_pos,
+                    'quat': np.asarray(self.sim.data.states.quat[0]).copy(),
+                    'blue_alive': np.asarray(self.blue_alive[0]).copy(),
+                    'red_alive': np.asarray(self.red_alive[0]).copy(),
+                }
+
             self._reset_done_worlds(done_mask)
+            # Mark trajectory for deferred clear (world 0 is the rendered world)
+            # Actual clear happens at start of next recording cycle so the
+            # final render of this episode still shows the full trajectory
+            if self._trajectory_enabled and done_mask[0]:
+                self._trajectory_pending_clear = True
 
         # Get observations (after auto-reset so we return initial obs for reset worlds)
         obs = self._get_observations()
@@ -1394,6 +1609,7 @@ class RedVsBlueEnv(gym.Env):
 
         # Get blue velocity for velocity penalty
         blue_vel = states.vel[:, :B]
+        red_vel = states.vel[:, B:]
 
         total_reward, components = _jit_compute_rewards(
             bb_collision, rr_collision, rb_collision, out_of_bounds,
@@ -1403,7 +1619,6 @@ class RedVsBlueEnv(gym.Env):
             self.cfg.reward_red_crash,
             self.cfg.reward_capture,
             self.cfg.reward_boundary,
-            self.cfg.reward_alive,
             self.cfg.reward_pursuer_proximity,
             self.cfg.reward_pursuer_proximity_decay,
             self.cfg.reward_angle_coef,
@@ -1415,6 +1630,8 @@ class RedVsBlueEnv(gym.Env):
             self.cfg.reward_action_smoothness_thrust,
             self.cfg.reward_action_smoothness_rpy,
             self.cfg.mass * self.cfg.gravity,  # hover_thrust
+            red_vel,
+            self.cfg.reward_rr_relative_velocity_coef,
             self.n_pairs,
         )
 
@@ -1460,20 +1677,28 @@ class RedVsBlueEnv(gym.Env):
         ally_one_hot_np = np.asarray(self.ally_one_hot)
         red_target_one_hot_np = np.asarray(self.red_target_one_hot)
 
-        # Convert quaternion to RPY (JIT-compiled)
+        # Convert quaternion to flattened rotation matrix for observations
         blue_quat = states.quat[:, :B]
-        blue_rpy = np.asarray(self._quat_to_rpy(blue_quat))
+        blue_rotmat = np.asarray(_jit_quat_to_matrix(blue_quat))    # (N, B, 3, 3)
+        blue_rotmat_flat = blue_rotmat.reshape(N, B, 9)              # (N, B, 9)
 
-        # Cache RPY for _get_shared_state (avoids recomputation in env.state())
-        self._cached_blue_rpy = blue_rpy
-
-        # Convert body angular velocity to Euler rates (JIT-compiled)
+        # Body angular velocity (native simulator state, no conversion needed)
         blue_ang_vel = states.ang_vel[:, :B]
-        blue_rpy_rates = np.asarray(_jit_ang_vel_to_rpy_rates(blue_quat, blue_ang_vel))
+        blue_body_rates = np.asarray(blue_ang_vel)                   # (N, B, 3)
 
-        # Build all agents' own states at once: (N, B, 12)
+        # Cache rotation matrix and body rates for _get_shared_state
+        self._cached_blue_rotmat_flat = blue_rotmat_flat
+        self._cached_blue_body_rates = blue_body_rates
+
+        # Compute and cache RPY + Euler rates for _get_info (MPC state)
+        blue_rpy = np.asarray(self._quat_to_rpy(blue_quat))
+        self._cached_blue_rpy = blue_rpy
+        blue_rpy_rates = np.asarray(_jit_ang_vel_to_rpy_rates(blue_quat, blue_ang_vel))
+        self._cached_blue_rpy_rates = blue_rpy_rates
+
+        # Build all agents' own states at once: (N, B, 18)
         all_own_states = np.concatenate([
-            blue_pos, blue_vel, blue_rpy, blue_rpy_rates
+            blue_pos, blue_vel, blue_rotmat_flat, blue_body_rates
         ], axis=-1)
 
         # All ally one-hots masked by alive: (N, B, B)
@@ -1503,7 +1728,8 @@ class RedVsBlueEnv(gym.Env):
     def _get_shared_state(self) -> np.ndarray:
         """Get shared state for centralized critic.
 
-        Reuses cached blue_rpy from _get_observations when available (called in same step).
+        Per drone: pos(3) + vel(3) + rotmat_flat(9) + body_rates(3) + alive(1) = 19
+        Reuses cached values from _get_observations when available (called in same step).
         """
         N, B, R = self.cfg.n_worlds, self.cfg.n_blue, self.cfg.n_red
 
@@ -1514,25 +1740,30 @@ class RedVsBlueEnv(gym.Env):
         blue_pos = pos_np[:, :B]
         blue_vel = vel_np[:, :B]
 
-        # Reuse cached blue_rpy if available (set by _get_observations in same step)
-        if hasattr(self, '_cached_blue_rpy') and self._cached_blue_rpy is not None:
-            blue_rpy = self._cached_blue_rpy
+        # Reuse cached blue rotation matrix + body rates if available
+        if hasattr(self, '_cached_blue_rotmat_flat') and self._cached_blue_rotmat_flat is not None:
+            blue_rotmat_flat = self._cached_blue_rotmat_flat
+            blue_body_rates = self._cached_blue_body_rates
         else:
-            blue_rpy = np.asarray(self._quat_to_rpy(states.quat[:, :B]))
+            blue_rotmat = np.asarray(_jit_quat_to_matrix(states.quat[:, :B]))
+            blue_rotmat_flat = blue_rotmat.reshape(N, B, 9)
+            blue_body_rates = np.asarray(states.ang_vel[:, :B])
 
         red_pos = pos_np[:, B:]
         red_vel = vel_np[:, B:]
-        red_rpy = np.asarray(self._quat_to_rpy(states.quat[:, B:]))
+        red_rotmat = np.asarray(_jit_quat_to_matrix(states.quat[:, B:]))
+        red_rotmat_flat = red_rotmat.reshape(N, R, 9)
+        red_body_rates = np.asarray(states.ang_vel[:, B:])
 
         blue_alive_np = np.asarray(self.blue_alive).astype(np.float32)
         red_alive_np = np.asarray(self.red_alive).astype(np.float32)
 
         blue_states = np.concatenate([
-            blue_pos, blue_vel, blue_rpy, blue_alive_np[:, :, None]
+            blue_pos, blue_vel, blue_rotmat_flat, blue_body_rates, blue_alive_np[:, :, None]
         ], axis=-1).reshape(N, -1)
 
         red_states = np.concatenate([
-            red_pos, red_vel, red_rpy, red_alive_np[:, :, None]
+            red_pos, red_vel, red_rotmat_flat, red_body_rates, red_alive_np[:, :, None]
         ], axis=-1).reshape(N, -1)
 
         target_one_hot = np.asarray(self.red_target_one_hot).reshape(N, -1)
@@ -1596,7 +1827,51 @@ class RedVsBlueEnv(gym.Env):
             sample_agent = self.possible_agents[0]
             info["reward/mean"] = float(rewards[sample_agent].mean())
 
+        # MPC state per blue agent: [pos(3), rpy(3), vel(3), drpy(3)] = 12
+        # Uses cached values from _get_observations() (called earlier in same step/reset)
+        B = self.cfg.n_blue
+        sim_states = self.sim.data.states
+        blue_pos = np.asarray(sim_states.pos)[:, :B]
+        blue_vel = np.asarray(sim_states.vel)[:, :B]
+        blue_rpy = self._cached_blue_rpy
+        blue_drpy = self._cached_blue_rpy_rates
+        if blue_rpy is not None and blue_drpy is not None:
+            mpc_state_all = np.concatenate(
+                [blue_pos, blue_rpy, blue_vel, blue_drpy], axis=-1
+            )  # (N, B, 12)
+            info["mpc_state"] = {
+                agent: mpc_state_all[:, i]
+                for i, agent in enumerate(self.possible_agents)
+            }
+
         return info
+
+    @staticmethod
+    def _smooth_trajectory(points: list[np.ndarray], window: int = 5) -> list[np.ndarray]:
+        """Smooth trajectory points with a moving average, keeping endpoints."""
+        n = len(points)
+        if n < 3:
+            return points
+        arr = np.array(points)
+        smoothed = np.copy(arr)
+        half = window // 2
+        for i in range(1, n - 1):
+            lo = max(0, i - half)
+            hi = min(n, i + half + 1)
+            smoothed[i] = arr[lo:hi].mean(axis=0)
+        return [smoothed[i] for i in range(n)]
+
+    @staticmethod
+    def _draw_line_segment(viewer, mujoco, p0: np.ndarray, p1: np.ndarray,
+                           width: float, rgba: np.ndarray):
+        """Draw an unlit line segment between two 3D points."""
+        viewer._markers.append({
+            "_line": True,
+            "from": p0.astype(np.float64),
+            "to": p1.astype(np.float64),
+            "width": float(width),
+            "rgba": rgba.astype(np.float32),
+        })
 
     def render(self, world: int = 0) -> np.ndarray | None:
         """Render the environment with LED colors for teams and dead drones hidden.
@@ -1616,8 +1891,10 @@ class RedVsBlueEnv(gym.Env):
         # Initialize viewer if needed (copied from Crazyflow)
         if self.sim.viewer is None:
             from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
-            self.sim.mj_model.vis.global_.offwidth = 1920
-            self.sim.mj_model.vis.global_.offheight = 1080
+            w = getattr(self, '_render_width', 1920)
+            h = getattr(self, '_render_height', 1080)
+            self.sim.mj_model.vis.global_.offwidth = w
+            self.sim.mj_model.vis.global_.offheight = h
             # Camera config: distance=6m for wider view of the arena
             cam_config = {
                 "distance": 6.0,
@@ -1630,10 +1907,18 @@ class RedVsBlueEnv(gym.Env):
                 self.sim.mj_data,
                 max_geom=self.sim.max_visual_geom,
                 default_cam_config=cam_config,
-                height=1080,
-                width=1920,
+                height=h,
+                width=w,
                 camera_id=-1,
             )
+            # Disable floor reflection and shadows
+            floor_id = mujoco.mj_name2id(self.sim.mj_model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+            if floor_id >= 0:
+                mat_id = self.sim.mj_model.geom_matid[floor_id]
+                if mat_id >= 0:
+                    self.sim.mj_model.mat_reflectance[mat_id] = 0.0
+            self.sim.mj_model.vis.quality.shadowsize = 0
+
             # Initialize LED colors on first render
             self._leds_initialized = False
 
@@ -1655,13 +1940,22 @@ class RedVsBlueEnv(gym.Env):
 
         # Build qpos from current state (pos + quat for each drone)
         # Format: [x, y, z, qw, qx, qy, qz] per drone
-        states = self.sim.data.states
-        pos = np.asarray(states.pos[world])  # (n_drones, 3)
-        quat = np.asarray(states.quat[world])  # (n_drones, 4)
-
-        # Get alive status
-        blue_alive = np.asarray(self.blue_alive[world])
-        red_alive = np.asarray(self.red_alive[world])
+        # Use saved pre-reset state if available (first render after auto-reset
+        # shows drones at their final episode positions, not new spawn positions)
+        pre = self._pre_reset_render_state
+        if pre is not None:
+            pos = pre['pos']
+            quat = pre['quat']
+            # Show all drones at final positions (even dead ones)
+            blue_alive = np.ones(self.cfg.n_blue, dtype=bool)
+            red_alive = np.ones(self.cfg.n_red, dtype=bool)
+            self._pre_reset_render_state = None  # consume once
+        else:
+            states = self.sim.data.states
+            pos = np.asarray(states.pos[world])  # (n_drones, 3)
+            quat = np.asarray(states.quat[world])  # (n_drones, 4)
+            blue_alive = np.asarray(self.blue_alive[world])
+            red_alive = np.asarray(self.red_alive[world])
         all_alive = np.concatenate([blue_alive, red_alive])
 
         # Update LED emission based on alive status
@@ -1707,6 +2001,84 @@ class RedVsBlueEnv(gym.Env):
 
         # Forward dynamics to update rendering state
         mujoco.mj_forward(self.sim.mj_model, self.sim.mj_data)
+
+        # Draw trajectory lines
+        if self._trajectory_enabled:
+            # Patch viewer to support line segment markers (once)
+            self.sim.viewer._get_viewer(self.render_mode)
+            viewer = self.sim.viewer.viewer
+            # Clear previous frame's line markers (OffScreenViewer doesn't auto-clear)
+            viewer._markers.clear()
+            if not getattr(viewer, '_marker_patched', False):
+                def _add_marker_to_scene(marker):
+                    if viewer.scn.ngeom >= viewer.scn.maxgeom:
+                        return
+                    g = viewer.scn.geoms[viewer.scn.ngeom]
+                    if marker.get("_line"):
+                        mujoco.mjv_initGeom(
+                            g,
+                            type=mujoco.mjtGeom.mjGEOM_LINE,
+                            size=np.zeros(3),
+                            pos=np.zeros(3),
+                            mat=np.eye(3).flatten(),
+                            rgba=marker["rgba"],
+                        )
+                        mujoco.mjv_connector(
+                            g,
+                            type=mujoco.mjtGeom.mjGEOM_LINE,
+                            width=marker["width"],
+                            from_=marker["from"],
+                            to=marker["to"],
+                        )
+                        g.category = mujoco.mjtCatBit.mjCAT_DECOR
+                        viewer.scn.ngeom += 1
+                        return
+                    g.dataid = -1
+                    g.objtype = mujoco.mjtObj.mjOBJ_UNKNOWN
+                    g.objid = -1
+                    g.category = mujoco.mjtCatBit.mjCAT_DECOR
+                    g.emission = 0
+                    g.specular = 0.5
+                    g.shininess = 0.5
+                    g.reflectance = 0
+                    g.type = mujoco.mjtGeom.mjGEOM_BOX
+                    g.size[:] = np.ones(3) * 0.1
+                    g.mat[:] = np.eye(3)
+                    g.rgba[:] = np.ones(4)
+                    for key, value in marker.items():
+                        if isinstance(value, (int, float, mujoco._enums.mjtGeom)):
+                            setattr(g, key, value)
+                        elif isinstance(value, np.ndarray):
+                            attr = getattr(g, key)
+                            attr[:] = value.reshape(attr.shape)
+                        elif isinstance(value, (str, bytes)):
+                            if isinstance(value, str):
+                                value = value.encode()
+                            setattr(g, key, value)
+                    viewer.scn.ngeom += 1
+                viewer._add_marker_to_scene = _add_marker_to_scene
+                viewer._marker_patched = True
+
+            # Colors matching MuJoCo axis brightness
+            blue_rgba = np.array([0.0, 0.0, 0.9, 1.0])  # evaders (blue, like Z-axis)
+            red_rgba = np.array([0.9, 0.0, 0.0, 1.0])   # pursuers (red, like X-axis)
+            # Scale line width with resolution (3px at 1920 base)
+            w = getattr(self, '_render_width', 1920)
+            line_width = 3.0 * w / 1920
+
+            n_blue = self.cfg.n_blue
+            n_drones = self.cfg.n_drones
+
+            # Extract per-drone trajectories and smooth
+            for drone_idx in range(n_drones):
+                pts = [snap[drone_idx] for snap in self._trajectories]
+                smoothed = self._smooth_trajectory(pts)
+                rgba = blue_rgba if drone_idx < n_blue else red_rgba
+                for i in range(1, len(smoothed)):
+                    self._draw_line_segment(
+                        viewer, mujoco, smoothed[i - 1], smoothed[i],
+                        line_width, rgba,
+                    )
 
         # Render
         return self.sim.viewer.render(self.render_mode)

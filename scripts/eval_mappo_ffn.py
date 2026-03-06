@@ -241,8 +241,9 @@ Example:
                         help="Disable domain randomization (mass/inertia) regardless of level config")
     parser.add_argument("--no-disturbance", action="store_true",
                         help="Disable external force/torque disturbances regardless of level config")
-    parser.add_argument("--override-mass", type=float, default=None,
-                        help="Override simulation mass [kg] for robustness testing")
+    parser.add_argument("--override-mass", type=float, nargs='+', default=None,
+                        help="Override blue simulation mass [kg]. Single value: all blue drones. "
+                             "Multiple values: per-drone (e.g., 0.0406 0.0306 for blue 1 and blue 2)")
 
     # Evaluation settings
     parser.add_argument("--n-episodes", type=int, default=100, help="Number of episodes to evaluate")
@@ -275,6 +276,10 @@ Example:
     # Observation saving
     parser.add_argument("--save-obs", action="store_true",
                         help="Save observations to CSV files in {run_dir}/obs_data/ep{N:03d}_sim.csv")
+
+    # Trajectory visualization
+    parser.add_argument("--trajectory", action="store_true",
+                        help="Draw trajectory lines for each drone (blue for evaders, red for pursuers)")
 
     return parser.parse_args()
 
@@ -415,8 +420,8 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     # Initial reset
     obs_dict, info = env.reset()
 
-    # Print initial positions (world 0) once at the start
-    initial_pos = np.asarray(raw_env.sim.data.states.pos[0])
+    # Print and cache initial positions (world 0)
+    initial_pos = np.asarray(raw_env.sim.data.states.pos[0]).copy()
     print(f"\n  Starting evaluation - Initial Positions (world 0):")
     for i in range(n_blue):
         pos = initial_pos[i]
@@ -436,7 +441,7 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     episode_times = [] if obs_save_dir is not None else None
     current_episode_for_obs = 1
 
-    policy_time = 0.0
+    policy_times_ms = []
     env_time = 0.0
 
     while episodes_completed < n_episodes:
@@ -461,7 +466,7 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                     print(f"      Obs shape: {obs.shape}, Obs[0][:10]: {obs[0][:10] if len(obs.shape) > 1 else obs[:10]}")
                     print(f"      Action (world 0): {actions[agent_name][0] if len(actions[agent_name].shape) > 1 else actions[agent_name]}")
                     print(f"      log_std: {log_std.cpu().numpy()}")
-        policy_time += time.perf_counter() - t0
+        policy_times_ms.append((time.perf_counter() - t0) * 1000.0)
 
         # Collect observations for saving
         if episode_observations is not None and n_worlds == 1:
@@ -590,6 +595,10 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             world_steps[world_idx] = 0
             world_rewards[world_idx] = 0.0
 
+            # Update cached initial positions for world 0 (auto-reset already happened)
+            if world_idx == 0 and recording:
+                initial_pos = np.asarray(raw_env.sim.data.states.pos[0]).copy()
+
         # Render/record if requested
         if render_interval and (global_step % render_interval) == 0:
             if not camera_initialized:
@@ -630,7 +639,36 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                 if frame is not None:
                     frame = frame.copy()
                     font = cv2.FONT_HERSHEY_SIMPLEX
-                    lines = [f"Episode: {episodes_completed}/{n_episodes}", f"Step: {global_step}"]
+
+                    # Gather overlay data
+                    vel = np.asarray(raw_env.sim.data.states.vel[0])
+                    speeds = np.linalg.norm(vel, axis=-1)
+                    blue_alive = np.asarray(raw_env.blue_alive[0])
+                    red_alive = np.asarray(raw_env.red_alive[0])
+
+                    if total_episodes_completed > 0:
+                        blue_win_rate = blue_wins / total_episodes_completed * 100
+                        red_win_rate = red_wins / total_episodes_completed * 100
+                    else:
+                        blue_win_rate = red_win_rate = 0.0
+
+                    lines = [
+                        f"Episode: {episodes_completed}/{n_episodes}  Step: {world_steps[0]}",
+                        f"Win Rates - Blue: {blue_win_rate:.1f}%  Red: {red_win_rate:.1f}%",
+                    ]
+                    # Initial positions
+                    for i in range(n_blue):
+                        p = initial_pos[i]
+                        lines.append(f"B{i} init: ({p[0]:+.2f}, {p[1]:+.2f}, {p[2]:+.2f})")
+                    for i in range(len(initial_pos) - n_blue):
+                        p = initial_pos[n_blue + i]
+                        lines.append(f"R{i} init: ({p[0]:+.2f}, {p[1]:+.2f}, {p[2]:+.2f})")
+                    # Live status
+                    blue_status = "  ".join(f"B{i}:{'O' if blue_alive[i] else 'X'} {speeds[i]:.2f}" for i in range(n_blue))
+                    red_status = "  ".join(f"R{i}:{'O' if red_alive[i] else 'X'} {speeds[n_blue + i]:.2f}" for i in range(len(red_alive)))
+                    lines.append(f"Blue: {blue_status}")
+                    lines.append(f"Red:  {red_status}")
+
                     y_offset = 20
                     for line in lines:
                         (text_w, text_h), _ = cv2.getTextSize(line, font, 0.5, 1)
@@ -651,7 +689,8 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 
     # Close progress bar and print final timing
     pbar.close()
-    print(f"\n  Final timing: policy={policy_time*1000:.1f}ms, env={env_time*1000:.1f}ms, total_steps={global_step}")
+    policy_times_arr = np.array(policy_times_ms)
+    print(f"\n  Policy inference: {policy_times_arr.mean():.3f} ± {policy_times_arr.std():.3f} ms/step  (n={len(policy_times_arr)}, total_steps={global_step})")
 
     # Trim to exact number of episodes
     all_episode_lengths = all_episode_lengths[:n_episodes]
@@ -669,6 +708,10 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
     # Compute statistics
     metrics = {
         "n_episodes": n_episodes,
+        "policy_inference_ms": {
+            "mean": float(policy_times_arr.mean()),
+            "std": float(policy_times_arr.std()),
+        },
         "episode_length": {
             "mean": float(np.mean(all_episode_lengths)),
             "std": float(np.std(all_episode_lengths)),
@@ -822,11 +865,9 @@ def main():
         disturbance_torque_std=env_config.get("disturbance_torque_std", 1e-4),
         # Rewards (from learning_config if available, else defaults)
         reward_capture=learning_config.get("rewards", {}).get("capture", -30.0) if learning_config else -30.0,
-        reward_escape=learning_config.get("rewards", {}).get("escape", 20.0) if learning_config else 20.0,
         reward_red_crash=learning_config.get("rewards", {}).get("red_crash", 20.0) if learning_config else 20.0,
         reward_blue_crash=learning_config.get("rewards", {}).get("blue_crash", -20.0) if learning_config else -20.0,
         reward_boundary=learning_config.get("rewards", {}).get("boundary", -5.0) if learning_config else -5.0,
-        reward_alive=learning_config.get("rewards", {}).get("alive", 0.1) if learning_config else 0.1,
         reward_pursuer_proximity=learning_config.get("rewards", {}).get("pursuer_proximity", 0.5) if learning_config else 0.5,
         reward_pursuer_proximity_decay=learning_config.get("rewards", {}).get("pursuer_proximity_decay", 2.0) if learning_config else 2.0,
         # Episode length
@@ -898,11 +939,24 @@ def main():
         env_cfg.enable_disturbance = False
         print("  ** Disturbances DISABLED (--no-disturbance) **")
 
-    # Override simulation mass if requested (for robustness testing)
+    # Override blue/evader simulation mass if requested (for robustness testing)
+    # Red/pursuers keep cfg.mass unchanged
     if args.override_mass is not None:
-        original_mass = env_cfg.mass
-        env_cfg.mass = args.override_mass
-        print(f"  ** Simulation mass OVERRIDDEN: {original_mass:.4f} -> {args.override_mass:.4f} kg **")
+        original_mass = env_cfg.blue_mass
+        if len(args.override_mass) == 1:
+            override_mass = args.override_mass[0]
+            env_cfg.blue_mass = override_mass
+            print(f"  ** Blue simulation mass OVERRIDDEN: {original_mass} -> {override_mass:.4f} kg (red uses {env_cfg.mass:.4f} kg) **")
+        else:
+            if len(args.override_mass) != env_cfg.n_blue:
+                raise ValueError(
+                    f"--override-mass got {len(args.override_mass)} values but n_blue={env_cfg.n_blue}. "
+                    f"Provide 1 value (all blue) or {env_cfg.n_blue} values (per-drone)."
+                )
+            override_mass = args.override_mass
+            env_cfg.blue_mass = override_mass
+            mass_strs = ', '.join(f'{m:.4f}' for m in override_mass)
+            print(f"  ** Blue simulation mass OVERRIDDEN per-drone: {original_mass} -> [{mass_strs}] kg (red uses {env_cfg.mass:.4f} kg) **")
 
     # Print final configuration for diagnostic purposes
     print(f"\nFinal environment configuration:")
@@ -955,6 +1009,10 @@ def main():
         render_mode = None
     env = RedVsBlueEnv(cfg=env_cfg, render_mode=render_mode, spawn_fn=spawn_fn)
 
+    # Enable trajectory visualization if requested
+    if args.trajectory and render_mode is not None:
+        env.enable_trajectory(enabled=True, subsample=5)
+
     # Wrap with action rescaling (policy outputs [-1, 1], env expects physical bounds)
     env = RescaleActionWrapper(env)
 
@@ -977,7 +1035,7 @@ def main():
     )
 
     # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     # SKRL saves models in various formats depending on version
     # Try different loading strategies

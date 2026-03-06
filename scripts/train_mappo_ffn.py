@@ -50,10 +50,11 @@ import torch
 from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_CFG
 from skrl.memories.torch import RandomMemory
 from skrl.resources.preprocessors.torch import RunningStandardScaler
+from crazyflie_mape_crazyflow.preprocessors import PartialRunningStandardScaler
 from skrl.resources.schedulers.torch import KLAdaptiveLR
 from skrl.trainers.torch import SequentialTrainer
 from skrl.envs.wrappers.torch import wrap_env
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import LinearLR, StepLR
 
 from crazyflie_mape_crazyflow.envs import RedVsBlueEnv, RedVsBlueEnvConfig, RescaleActionWrapper
 from crazyflie_mape_crazyflow.policies import (
@@ -218,12 +219,14 @@ class TerminationLoggingWrapper:
             for name in self._component_names:
                 self._cumulative_components[name] += components[name]
 
-            # Check which worlds terminated this step
+            # Check which worlds had an episode end this step
+            # IMPORTANT: Use episode-level termination, not per-agent termination.
+            # Per-agent terminated is True whenever the agent is dead (even mid-episode),
+            # which would prematurely flush cumulative rewards.
             sample_agent = self._raw_env.possible_agents[0]
-            terminated_arr = terminated.get(sample_agent, np.zeros(n_worlds, dtype=bool))
+            episode_terminated = info.get("episode_terminated", np.zeros(n_worlds, dtype=bool))
             truncated_arr = truncated.get(sample_agent, np.zeros(n_worlds, dtype=bool))
-            # Flatten to 1D in case arrays are (n_worlds, 1) from SKRL wrapper
-            done_mask = np.asarray(terminated_arr | truncated_arr).flatten()
+            done_mask = np.asarray(episode_terminated).flatten() | np.asarray(truncated_arr).flatten()
 
             # Record completed episode returns and reset cumulative for done worlds
             if done_mask.any():
@@ -605,7 +608,7 @@ def main():
             "per_agent_obs_dim": raw_env.obs_dim,
             "shared_state_dim": raw_env.shared_observation_space.shape[0],
             "components": [
-                "own_state: pos(3) + vel(3) + rpy(3) + rpy_rates(3) = 12",
+                "own_state: pos(3) + vel(3) + rotmat_flat(9) + body_rates(3) = 18",
                 "own_one_hot: n_blue",
                 "all_blue_states: n_blue * (pos(3) + vel(3) + alive(1)) = n_blue * 7",
                 "all_red_states: n_red * (pos(3) + vel(3) + alive(1)) = n_red * 7",
@@ -638,11 +641,9 @@ def main():
         # Rewards
         "rewards": {
             "capture": env_cfg.reward_capture,
-            "escape": env_cfg.reward_escape,
             "red_crash": env_cfg.reward_red_crash,
             "blue_crash": env_cfg.reward_blue_crash,
             "boundary": env_cfg.reward_boundary,
-            "alive": env_cfg.reward_alive,
             "pursuer_proximity": env_cfg.reward_pursuer_proximity,
             "pursuer_proximity_decay": env_cfg.reward_pursuer_proximity_decay,
             "angle_coef": env_cfg.reward_angle_coef,
@@ -652,6 +653,7 @@ def main():
             "action_coef": env_cfg.reward_action_coef,
             "action_smoothness_thrust": env_cfg.reward_action_smoothness_thrust,
             "action_smoothness_rpy": env_cfg.reward_action_smoothness_rpy,
+            "rr_relative_velocity_coef": env_cfg.reward_rr_relative_velocity_coef,
         },
         # PPO hyperparameters
         "hyperparameters": {
@@ -767,19 +769,46 @@ def main():
         lr_scheduler_kwargs = {agent: base_kwargs.copy() for agent in possible_agents}
         print(f"  - learning_rate_scheduler: StepLR")
         print(f"  - learning_rate_scheduler_kwargs: {base_kwargs}")
+    elif lr_scheduler == "LinearLR":
+        lr_scheduler_class = LinearLR
+        base_kwargs = training_cfg["learning_rate_scheduler_kwargs"]
+        lr_scheduler_kwargs = {agent: base_kwargs.copy() for agent in possible_agents}
+        print(f"  - learning_rate_scheduler: LinearLR")
+        print(f"  - learning_rate_scheduler_kwargs: {base_kwargs}")
 
+    # Observation preprocessor
+    obs_preprocessor_class = None
+    obs_preprocessor_kwargs = {agent: {} for agent in possible_agents}
+    obs_preprocessor = training_cfg.get("observation_preprocessor")
+    if obs_preprocessor == "RunningStandardScaler":
+        obs_preprocessor_class = PartialRunningStandardScaler
+        obs_size = raw_env.obs_dim
+        obs_skip = raw_env.obs_binary_dims
+        base_kwargs = {"size": obs_size, "skip_dims": obs_skip, "device": device}
+        obs_preprocessor_kwargs = {agent: base_kwargs.copy() for agent in possible_agents}
+        print(f"  - observation_preprocessor: PartialRunningStandardScaler (size={obs_size}, skip={len(obs_skip)} binary dims)")
+
+    # State preprocessor (centralized critic input)
+    state_preprocessor_class = None
+    state_preprocessor_kwargs = {agent: {} for agent in possible_agents}
+    state_preprocessor = training_cfg.get("state_preprocessor")
+    if state_preprocessor == "RunningStandardScaler":
+        state_preprocessor_class = PartialRunningStandardScaler
+        state_size = raw_env.shared_observation_space.shape[0]
+        state_skip = raw_env.state_binary_dims
+        base_kwargs = {"size": state_size, "skip_dims": state_skip, "device": device}
+        state_preprocessor_kwargs = {agent: base_kwargs.copy() for agent in possible_agents}
+        print(f"  - state_preprocessor: PartialRunningStandardScaler (size={state_size}, skip={len(state_skip)} binary dims)")
+
+    # Value preprocessor
     value_preprocessor_class = None
-    value_preprocessor_kwargs = {agent: {} for agent in possible_agents}  # Agent-specific empty dicts
-    value_preprocessor = training_cfg["value_preprocessor"]
+    value_preprocessor_kwargs = {agent: {} for agent in possible_agents}
+    value_preprocessor = training_cfg.get("value_preprocessor")
     if value_preprocessor == "RunningStandardScaler":
         value_preprocessor_class = RunningStandardScaler
         base_kwargs = {"size": 1, "device": device}
         value_preprocessor_kwargs = {agent: base_kwargs.copy() for agent in possible_agents}
         print(f"  - value_preprocessor: RunningStandardScaler")
-
-    # State/observation preprocessor kwargs (agent-specific empty dicts)
-    obs_preprocessor_kwargs = {agent: {} for agent in possible_agents}
-    state_preprocessor_kwargs = {agent: {} for agent in possible_agents}
 
     mappo_cfg = MAPPO_CFG(
         rollouts=training_cfg["rollouts"],
@@ -790,7 +819,9 @@ def main():
         learning_rate=training_cfg["learning_rate"],
         learning_rate_scheduler=lr_scheduler_class,
         learning_rate_scheduler_kwargs=lr_scheduler_kwargs,
+        observation_preprocessor=obs_preprocessor_class,
         observation_preprocessor_kwargs=obs_preprocessor_kwargs,
+        state_preprocessor=state_preprocessor_class,
         state_preprocessor_kwargs=state_preprocessor_kwargs,
         grad_norm_clip=training_cfg["grad_norm_clip"],
         entropy_loss_scale=training_cfg["entropy_loss_scale"],

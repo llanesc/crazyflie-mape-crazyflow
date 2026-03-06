@@ -55,8 +55,8 @@ obs = obs_dict[env.possible_agents[0]]
 print(f'\nObservation shape: {obs.shape}')
 print(f'Own pos: {obs[0, :3]}')
 print(f'Own vel: {obs[0, 3:6]}')
-print(f'Own rpy: {obs[0, 6:9]}')
-print(f'Own ang_vel: {obs[0, 9:12]}')
+print(f'Own rotmat: {obs[0, 6:15]}')
+print(f'Own body_rates: {obs[0, 15:18]}')
 
 # Get action from policy
 obs_tensor = torch.tensor(obs, dtype=torch.float32)

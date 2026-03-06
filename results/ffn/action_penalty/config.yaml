@@ -19,7 +19,7 @@ environment:
   rb_collision_tolerance: 0.2
 
   # Boundary settings
-  boundary_size: 4.0
+  boundary_size: 5.0
   min_altitude: 0.5
   max_altitude: 2.0
 
@@ -27,15 +27,15 @@ environment:
   spawn:
     blue:
       method: "box_random"
-      x_min: 1.5
-      x_max: 2.5
+      x_min: -0.5
+      x_max: 0.5
       y_half: 1.0
       z_min: 0.8
       z_max: 1.2
     red:
       method: "box_random"
-      x_min: -0.5
-      x_max: 0.5
+      x_min: 2.5
+      x_max: 3.5
       y_half: 1.0
       z_min: 0.8
       z_max: 1.2
@@ -107,25 +107,28 @@ training:
   value_clip: 0.2
   kl_threshold: 0.0
 
-  # Value preprocessor (optional)
+  # Preprocessors (optional)
   # Options: "RunningStandardScaler" or null (no preprocessing)
-  value_preprocessor: null
+  observation_preprocessor: "RunningStandardScaler"
+  state_preprocessor: "RunningStandardScaler"
+  value_preprocessor: "RunningStandardScaler"
 
   # Learning rate scheduler (optional)
-  # Options: "KLAdaptiveLR", "StepLR", or null (no scheduler)
-  # KLAdaptiveLR kwargs: kl_threshold
-  # StepLR kwargs: step_size, gamma
-  learning_rate_scheduler: null
+  # Options: "KLAdaptiveLR", "StepLR", "LinearLR", or null (no scheduler)
+  # LinearLR kwargs: start_factor, end_factor, total_iters
+  learning_rate_scheduler: "LinearLR"
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.0
+    start_factor: 1.0
+    end_factor: 0.0333    # decay to 1e-5 (= 3e-4 * 0.0333)
+    total_iters: 31250    # 2M world steps / 256 rollout * 4 scheduler steps per rollout
 
 # Reward settings
 rewards:
   capture: -5.0
   red_crash: 30.0
+  rr_relative_velocity_coef: 1.0  # Bonus for red-red collisions scaled by ||v_rel||
   blue_crash: -5.0
   boundary: -5.0
-  alive: 0.00
   pursuer_proximity: 0.3
   pursuer_proximity_decay: 2.5
   # Angle penalty (penalizes orientation deviation from level flight)
@@ -134,10 +137,10 @@ rewards:
   action_coef: 0.5
   action_smoothness_thrust: 5.0
   action_smoothness_rpy: 1.0
-  velocity_coef: 0.1
+  velocity_coef: 0.03
   # Ground proximity penalty (exponential, ~0 at hover, max at min_altitude)
   ground_proximity_coef: 0.0
-  ground_proximity_decay: 10.0
+  ground_proximity_decay: 6.0
 
 # Curriculum learning settings
 curriculum:
@@ -149,12 +152,12 @@ curriculum:
       spawn:
         blue:
           method: "deterministic"
-          x: 3.0
+          x: 0.0
           teammate_spacing: 1.0
           initial_height: 1.0
         red:                                                                                                                                                                                        
           method: "nominal_box"                                                                                                                                                                      
-          x: 0.0                  # nominal x position for all red agents                                                                                                                           
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
           teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
           x_half: 0.1             # spawn within ±x_half of nominal x                                                                                                                                   
@@ -169,19 +172,19 @@ curriculum:
       spawn:
         blue:
           method: "deterministic"
-          x: 3.0
+          x: 0.0
           teammate_spacing: 1.0
           initial_height: 1.0
         red:                                                                                                                                                                                        
           method: "nominal_box"                                                                                                                                                                      
-          x: 0.0                  # nominal x position for all red agents                                                                                                                           
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
           teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
           x_half: 0.25             # spawn within ±x_half of nominal x                                                                                                                                   
           y_half: 0.25             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.25             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.45  # > collision tolerance to avoid immediate collision
-      bb_collision_tolerance: 0.2
+      bb_collision_tolerance: 0.3
       rr_collision_tolerance: 0.4
       rb_collision_tolerance: 0.4
 
@@ -189,19 +192,19 @@ curriculum:
       spawn:
         blue:
           method: "deterministic"
-          x: 3.0
+          x: 0.0
           teammate_spacing: 1.0
           initial_height: 1.0
         red:                                                                                                                                                                                        
           method: "nominal_box"                                                                                                                                                                      
-          x: 0.0                  # nominal x position for all red agents                                                                                                                           
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
           teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
           x_half: 0.35             # spawn within ±x_half of nominal x                                                                                                                                   
           y_half: 0.35             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.35             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.45  # > collision tolerance to avoid immediate collision
-      bb_collision_tolerance: 0.2
+      bb_collision_tolerance: 0.3
       rr_collision_tolerance: 0.4
       rb_collision_tolerance: 0.4
 
@@ -209,19 +212,19 @@ curriculum:
       spawn:
         blue:
           method: "deterministic"
-          x: 3.0
+          x: 0.0
           teammate_spacing: 1.0
           initial_height: 1.0
         red:                                                                                                                                                                                        
           method: "nominal_box"                                                                                                                                                                      
-          x: 0.0                  # nominal x position for all red agents                                                                                                                           
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
           teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
           x_half: 0.4             # spawn within ±x_half of nominal x                                                                                                                                   
           y_half: 0.4             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.4             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_collision_tolerance: 0.2
+      bb_collision_tolerance: 0.3
       rr_collision_tolerance: 0.4
       rb_collision_tolerance: 0.4
       # Domain randomization
@@ -234,19 +237,19 @@ curriculum:
       spawn:
         blue:
           method: "deterministic"
-          x: 3.0
+          x: 0.0
           teammate_spacing: 1.0
           initial_height: 1.0
         red:                                                                                                                                                                                        
           method: "nominal_box"                                                                                                                                                                      
-          x: 0.0                  # nominal x position for all red agents                                                                                                                           
-          teammate_spacing: 0.7   # spacing between agents along y-axis                                                                                                                              
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
+          teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
           x_half: 0.4             # spawn within ±x_half of nominal x                                                                                                                                   
           y_half: 0.4             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.4             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_collision_tolerance: 0.2
+      bb_collision_tolerance: 0.3
       rr_collision_tolerance: 0.4
       rb_collision_tolerance: 0.4
       # Domain randomization
@@ -259,19 +262,19 @@ curriculum:
       spawn:
         blue:
           method: "deterministic"
-          x: 3.0
+          x: 0.0
           teammate_spacing: 1.0
           initial_height: 1.0
         red:                                                                                                                                                                                        
           method: "nominal_box"                                                                                                                                                                      
-          x: 0.0                  # nominal x position for all red agents                                                                                                                           
-          teammate_spacing: 0.7   # spacing between agents along y-axis                                                                                                                              
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
+          teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
           x_half: 0.4             # spawn within ±x_half of nominal x                                                                                                                                   
           y_half: 0.4             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.4             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_collision_tolerance: 0.2
+      bb_collision_tolerance: 0.3
       rr_collision_tolerance: 0.4
       rb_collision_tolerance: 0.4
       # Domain randomization
@@ -288,19 +291,19 @@ curriculum:
       spawn:
         blue:
           method: "deterministic"
-          x: 3.0
+          x: 0.0
           teammate_spacing: 1.0
           initial_height: 1.0
         red:                                                                                                                                                                                        
           method: "nominal_box"                                                                                                                                                                      
-          x: 0.0                  # nominal x position for all red agents                                                                                                                           
-          teammate_spacing: 0.7   # spacing between agents along y-axis                                                                                                                              
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
+          teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
           x_half: 0.5             # spawn within ±x_half of nominal x                                                                                                                                   
           y_half: 0.5             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.4             # spawn within ±z_half of nominal z 
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_collision_tolerance: 0.2
+      bb_collision_tolerance: 0.3
       rr_collision_tolerance: 0.35
       rb_collision_tolerance: 0.35
       # Domain randomization
@@ -317,19 +320,19 @@ curriculum:
       spawn:
         blue:
           method: "deterministic"
-          x: 3.0
+          x: 0.0
           teammate_spacing: 1.0
           initial_height: 1.0
         red:                                                                                                                                                                                        
           method: "nominal_box"                                                                                                                                                                      
-          x: 0.0                  # nominal x position for all red agents                                                                                                                           
-          teammate_spacing: 0.7   # spacing between agents along y-axis                                                                                                                              
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
+          teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
-          x_half: 0.6             # spawn within ±x_half of nominal x                                                                                                                                   
-          y_half: 0.6             # spawn within ±y_half of nominal y                                                                                                                                   
-          z_half: 0.4             # spawn within ±z_half of nominal z 
+          x_half: 0.5             # spawn within ±x_half of nominal x
+          y_half: 0.5             # spawn within ±y_half of nominal y
+          z_half: 0.4             # spawn within ±z_half of nominal z
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
-      bb_collision_tolerance: 0.2
+      bb_collision_tolerance: 0.3
       rr_collision_tolerance: 0.3
       rb_collision_tolerance: 0.3
       # Domain randomization
@@ -346,17 +349,17 @@ curriculum:
       spawn:
         blue:
           method: "deterministic"
-          x: 3.0
+          x: 0.0
           teammate_spacing: 1.0
           initial_height: 1.0
         red:
           method: "nominal_box"                                                                                                                                                                      
-          x: 0.0                  # nominal x position for all red agents                                                                                                                           
-          teammate_spacing: 0.7   # spacing between agents along y-axis                                                                                                                              
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
+          teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
-          x_half: 0.6             # spawn within ±x_half of nominal x                                                                                                                                   
-          y_half: 0.6             # spawn within ±y_half of nominal y                                                                                                                                   
-          z_half: 0.4             # spawn within ±z_half of nominal z 
+          x_half: 0.5             # spawn within ±x_half of nominal x
+          y_half: 0.5             # spawn within ±y_half of nominal y
+          z_half: 0.4             # spawn within ±z_half of nominal z
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
       bb_collision_tolerance: 0.2
       rr_collision_tolerance: 0.2
@@ -368,26 +371,27 @@ curriculum:
       inertia_randomization_std: 1.0e-6  # Standard deviation for inertia randomization [kg*m^2]
       # Disturbance forces/torques
       enable_disturbance: true  # Enable random disturbance forces and torques
-      disturbance_force_std: 5.0e-3  # Standard deviation for force disturbance [N]
+      disturbance_force_std: 0.005  # Standard deviation for force disturbance [N]
       disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]
 
     - level: 9
       spawn:
         blue:
           method: "nominal_box"                                                                                                                                                                      
-          x: 3.0                  # nominal x position for all red agents                                                                                                                           
+          x: 0.0                  # nominal x position for all blue agents                                                                                                                           
           teammate_spacing: 1.0   # spacing between agents along y-axis                                                                                                                              
           initial_height: 1.0     # nominal z position                                                                                                                                               
           x_half: 0.1             # spawn within ±x_half of nominal x                                                                                                                                   
           y_half: 0.1             # spawn within ±y_half of nominal y                                                                                                                                   
           z_half: 0.1             # spawn within ±z_half of nominal z 
         red:
-          method: "box_random"
-          x_min: -0.5
-          x_max: 0.5
-          y_half: 1.0
-          z_min: 0.8
-          z_max: 1.2
+          method: "nominal_box"                                                                                                                                                                      
+          x: 3.0                  # nominal x position for all red agents                                                                                                                           
+          teammate_spacing: 0.5   # spacing between agents along y-axis                                                                                                                              
+          initial_height: 1.0     # nominal z position                                                                                                                                               
+          x_half: 0.5             # spawn within ±x_half of nominal x
+          y_half: 0.5             # spawn within ±y_half of nominal y
+          z_half: 0.4             # spawn within ±z_half of nominal z
         min_spawn_distance: 0.5  # > collision tolerance to avoid immediate collision
       bb_collision_tolerance: 0.2
       rr_collision_tolerance: 0.2
@@ -399,5 +403,5 @@ curriculum:
       inertia_randomization_std: 1.0e-6  # Standard deviation for inertia randomization [kg*m^2]
       # Disturbance forces/torques
       enable_disturbance: true  # Enable random disturbance forces and torques
-      disturbance_force_std: 0.03  # Standard deviation for force disturbance [N]
-      disturbance_torque_std: 3.0e-4  # Standard deviation for torque disturbance [Nm]
+      disturbance_force_std: 0.005  # Standard deviation for force disturbance [N]
+      disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]

@@ -31,6 +31,18 @@ results/**/checkpoints/
 *.mp4
 *.avi
 
+# Documents and images
+*.pdf
+*.tex
+*.aux
+*.png
+
+# Data
+*.csv
+
+# Config files (hardware models)
+*_config.json
+
 # Logs
 *.log
 tensorboard/

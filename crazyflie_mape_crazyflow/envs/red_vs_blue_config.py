@@ -46,11 +46,9 @@ class RedVsBlueEnvConfig:
         pp_k_vz: Pure pursuit velocity gain (z).
 
         reward_capture: Reward when blue is captured (negative).
-        reward_escape: Reward when blue survives episode (positive).
         reward_red_crash: Reward when red crashes (positive for blue).
         reward_blue_crash: Reward for blue-blue collision (negative).
         reward_boundary: Reward for boundary violation (negative).
-        reward_alive: Per-step survival bonus.
         reward_pursuer_proximity: Reward when pursuers are close to each other.
         reward_pursuer_proximity_decay: Exponential decay rate for pursuer proximity reward.
 
@@ -79,7 +77,8 @@ class RedVsBlueEnvConfig:
     pursuer_strategy: str = "ProNav"  # "PP" or "ProNav"
 
     # Physical parameters (computed from drone_model in __post_init__, can be overridden)
-    mass: float | None = None  # Simulation mass [kg], if None loaded from drone_model
+    mass: float | None = None  # Simulation mass [kg] for all drones, if None loaded from drone_model
+    blue_mass: float | list[float] | None = None  # Override mass [kg] for blue/evader drones only (eval). Scalar=all blue, list=per-drone. None = use mass.
     gravity: float = field(init=False)
     thrust_min: float | None = None  # If None, computed as mass * gravity * 0.5
     thrust_max: float | None = None  # If None, computed as mass * gravity * 1.5
@@ -127,13 +126,12 @@ class RedVsBlueEnvConfig:
 
     # Reward scales
     reward_capture: float = -30.0
-    reward_escape: float = 20.0
     reward_red_crash: float = 20.0
     reward_blue_crash: float = -20.0
     reward_boundary: float = -5.0
-    reward_alive: float = 0.1
     reward_pursuer_proximity: float = 0.5  # Reward evaders when pursuers are close to each other
     reward_pursuer_proximity_decay: float = 2.0  # Exponential decay rate for pursuer proximity reward
+    reward_rr_relative_velocity_coef: float = 0.0  # Bonus for red-red collisions scaled by relative velocity
 
     # Angle penalty (penalizes orientation deviation from level flight)
     reward_angle_coef: float = 0.04  # Coefficient for ||rpy|| penalty
@@ -164,9 +162,13 @@ class RedVsBlueEnvConfig:
 
         # Load physical parameters from drone-models
         drone_params = load_params("first_principles", self.drone_model)
-        # Use user-provided mass or load from drone_model
+        self.drone_model_mass = float(drone_params["mass"])
+        # mass: base mass for all drones (red always uses this)
         if self.mass is None:
-            self.mass = float(drone_params["mass"])
+            self.mass = self.drone_model_mass
+        # blue_mass: optional override for blue/evader drones only (e.g. eval)
+        if self.blue_mass is None:
+            self.blue_mass = self.mass
         self.gravity = float(np.abs(drone_params["gravity_vec"][2]))
         # Use user-provided thrust limits or compute from mass/gravity
         if self.thrust_min is None:

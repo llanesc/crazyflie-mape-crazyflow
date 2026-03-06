@@ -110,7 +110,7 @@
             "justMyCode": false,
             "args": [
                 "--experiment", "action_penalty",
-                "--checkpoint", "run_20260207143901",
+                "--checkpoint", "run_20260208031730",
                 "--level", "1",
                 "--n-episodes", "100",
                 "--device", "cpu",

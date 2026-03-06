@@ -55,7 +55,7 @@ class MultiAgentPursuitEvasionServer(Node):
         self.bb_collision_tolerance = config.get('bb_collision_tolerance', 0.2)
         self.rr_collision_tolerance = config.get('rr_collision_tolerance', 0.2)
         self.rb_collision_tolerance = config.get('rb_collision_tolerance', 0.2)
-        self.boundary_size = config.get('boundary_size', 3.0)
+        self.boundary_size = config.get('boundary_size', 5.0)
         self.min_altitude = config.get('min_altitude', 0.1)
         self.max_altitude = config.get('max_altitude', 2.0)
 
@@ -283,7 +283,7 @@ class MultiAgentPursuitEvasionServer(Node):
         """
         cf_states[index].angular_velocity = [
             msg.values[0] / 1000.0,
-            -msg.values[1] / 1000.0,
+            msg.values[1] / 1000.0,
             msg.values[2] / 1000.0
         ]
         ready[index, ready_index] = True
@@ -379,6 +379,29 @@ class MultiAgentPursuitEvasionServer(Node):
         rb_dist = norm(blue_pos[self.blue_meshgrid[0:self.n_red, :], :] - red_pos[:, None, :], axis=2, keepdims=True)
         rb_crash = np.any((rb_dist < self.rb_collision_tolerance) * blue_states[:, [-1]], axis=1).flatten()
 
+        # Log pairwise distances when close to collision threshold
+        for i in range(self.n_red):
+            for j in range(i + 1, self.n_red):
+                d = norm(red_pos[i] - red_pos[j])
+                if d < self.rr_collision_tolerance * 2:
+                    self.get_logger().info(
+                        f'RR dist r{i}-r{j}: {d:.3f}m (tol={self.rr_collision_tolerance})'
+                    )
+        for i in range(self.n_blue):
+            for j in range(i + 1, self.n_blue):
+                d = norm(blue_pos[i] - blue_pos[j])
+                if d < self.bb_collision_tolerance * 2:
+                    self.get_logger().info(
+                        f'BB dist b{i}-b{j}: {d:.3f}m (tol={self.bb_collision_tolerance})'
+                    )
+        for i in range(self.n_blue):
+            for j in range(self.n_red):
+                d = norm(blue_pos[i] - red_pos[j])
+                if d < self.rb_collision_tolerance * 2:
+                    self.get_logger().info(
+                        f'BR dist b{i}-r{j}: {d:.3f}m (tol={self.rb_collision_tolerance})'
+                    )
+
         # Boundary violations (blue only)
         out_of_bounds = (
             (np.abs(blue_pos[:, 0]) > self.boundary_size) |
@@ -399,7 +422,8 @@ class MultiAgentPursuitEvasionServer(Node):
                 if br_crash[idx]:
                     reason.append("captured by red")
                 if out_of_bounds[idx]:
-                    reason.append("out of bounds")
+                    pos = blue_pos[idx]
+                    reason.append(f"out of bounds at pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
                 self.get_logger().info(f'BLUE {idx} deactivated: {", ".join(reason)}')
             self.cf_blue_states[idx].active = False
         for idx in red_deactivated:

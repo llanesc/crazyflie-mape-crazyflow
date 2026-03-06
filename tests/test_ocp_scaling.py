@@ -24,7 +24,7 @@ from leap_c.ocp.acados.initializer import AcadosDiffMpcInitializer
 from leap_c.ocp.acados.parameters import AcadosParameter, AcadosParameterManager
 from leap_c.ocp.acados.torch import AcadosDiffMpcCtx, AcadosDiffMpcTorch
 
-from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp import (
+from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp_external import (
     NX,
     NU,
     Q_STATE_SIZE,
@@ -713,7 +713,7 @@ def main():
 
     # --- Build UNSCALED (current) OCP ---
     print("\nBuilding UNSCALED (current) OCP...")
-    from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp import export_parametric_ocp
+    from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp_external import export_parametric_ocp
 
     params_list_unscaled = create_quadrotor_params(
         N_horizon=N_HORIZON, param_interface="stagewise", drone_model=DRONE_MODEL,
