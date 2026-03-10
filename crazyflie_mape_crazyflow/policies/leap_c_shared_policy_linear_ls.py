@@ -37,49 +37,6 @@ from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp_linear_ls import (
 )
 
 
-def _rotation_matrix_to_euler(rotmat: torch.Tensor) -> torch.Tensor:
-    """Convert rotation matrix to RPY Euler angles (XYZ intrinsic convention).
-
-    Args:
-        rotmat: Rotation matrices, shape (..., 3, 3).
-
-    Returns:
-        RPY angles [roll, pitch, yaw], shape (..., 3).
-    """
-    sy = torch.sqrt(rotmat[..., 0, 0] ** 2 + rotmat[..., 1, 0] ** 2)
-    pitch = torch.atan2(-rotmat[..., 2, 0], sy)
-    roll = torch.atan2(rotmat[..., 2, 1], rotmat[..., 2, 2])
-    yaw = torch.atan2(rotmat[..., 1, 0], rotmat[..., 0, 0])
-    return torch.stack([roll, pitch, yaw], dim=-1)
-
-
-def _body_rates_to_euler_rates(rpy: torch.Tensor, body_rates: torch.Tensor) -> torch.Tensor:
-    """Convert body angular velocity [p, q, r] to Euler rates [droll, dpitch, dyaw].
-
-    Args:
-        rpy: RPY angles, shape (..., 3).
-        body_rates: Body angular velocity [p, q, r], shape (..., 3).
-
-    Returns:
-        Euler rates [droll, dpitch, dyaw], shape (..., 3).
-    """
-    phi = rpy[..., 0]
-    theta = rpy[..., 1]
-    p = body_rates[..., 0]
-    q = body_rates[..., 1]
-    r = body_rates[..., 2]
-
-    cos_phi = torch.cos(phi)
-    sin_phi = torch.sin(phi)
-    cos_theta = torch.cos(theta)
-    tan_theta = torch.tan(theta)
-
-    droll = p + sin_phi * tan_theta * q + cos_phi * tan_theta * r
-    dpitch = cos_phi * q - sin_phi * r
-    dyaw = (sin_phi / cos_theta) * q + (cos_phi / cos_theta) * r
-    return torch.stack([droll, dpitch, dyaw], dim=-1)
-
-
 def get_activation(name: str) -> nn.Module:
     """Get activation module by name."""
     activations = {
@@ -121,6 +78,7 @@ class LeapCMPCLayerLinearLS(nn.Module):
         mass: Optional[float] = None,
         gravity: Optional[float] = None,
         drone_model: str = "cf2x_L250",
+        mpc_model: str = "so_rpy",
         n_batch_max: int = 4096,
         num_threads: int = 8,
         velocity_max: Optional[float] = None,
@@ -142,6 +100,7 @@ class LeapCMPCLayerLinearLS(nn.Module):
             mass: Drone mass [kg]. None to load from drone_model.
             gravity: Gravitational acceleration [m/s^2]. None to load from drone_model.
             drone_model: Drone model identifier.
+            mpc_model: Physics model for MPC dynamics ("so_rpy" or "so_rpy_rotor_drag").
             n_batch_max: Maximum batch size for parallel MPC solves.
             num_threads: Number of threads for parallel MPC solves.
             velocity_max: Maximum velocity constraint [m/s]. None to disable.
@@ -164,6 +123,7 @@ class LeapCMPCLayerLinearLS(nn.Module):
             n_batch_max=n_batch_max,
             num_threads=num_threads,
             drone_model=drone_model,
+            mpc_model=mpc_model,
             velocity_max=velocity_max,
             roll_pitch_max=roll_pitch_max,
             yaw_max=yaw_max,
@@ -403,7 +363,6 @@ class LeapCSharedGaussianPolicyLinearLS(GaussianMixin, Model):
         mpc_horizon: int = 2,
         mpc_dt: float = 0.01,
         hidden_dim: int = 256,
-        state_indices: Optional[dict] = None,
         roll_pitch_max: float = 0.5,
         yaw_max: float = 0.1,
         thrust_min: float = 1.23,
@@ -411,6 +370,7 @@ class LeapCSharedGaussianPolicyLinearLS(GaussianMixin, Model):
         mass: Optional[float] = None,
         gravity: Optional[float] = None,
         drone_model: str = "cf2x_L250",
+        mpc_model: str = "so_rpy",
         n_batch_max: int = 4096,
         num_threads: int = 8,
         velocity_max: Optional[float] = None,
@@ -434,7 +394,6 @@ class LeapCSharedGaussianPolicyLinearLS(GaussianMixin, Model):
 
         self.mpc_horizon = mpc_horizon
         self.mpc_dt = mpc_dt
-        self.state_indices = state_indices or self._default_state_indices()
 
         obs_dim = gymnasium.spaces.flatdim(observation_space)
         action_dim = gymnasium.spaces.flatdim(action_space)
@@ -453,6 +412,7 @@ class LeapCSharedGaussianPolicyLinearLS(GaussianMixin, Model):
             mass=mass,
             gravity=gravity,
             drone_model=drone_model,
+            mpc_model=mpc_model,
             n_batch_max=n_batch_max,
             num_threads=num_threads,
             velocity_max=velocity_max,
@@ -476,22 +436,6 @@ class LeapCSharedGaussianPolicyLinearLS(GaussianMixin, Model):
             )
         self.log_std_parameter = nn.Parameter(initial_log_std_tensor)
 
-    def _default_state_indices(self) -> dict:
-        """Default state indices for RedVsBlueEnv observation format.
-
-        The observation format is:
-        - [0:3] = position (x, y, z)
-        - [3:6] = velocity (vx, vy, vz)
-        - [6:15] = rotation matrix (flattened 3x3)
-        - [15:18] = body angular velocity (p, q, r)
-        """
-        return {
-            'position': [0, 1, 2],
-            'velocity': [3, 4, 5],
-            'rotation_matrix': [6, 7, 8, 9, 10, 11, 12, 13, 14],
-            'body_rates': [15, 16, 17],
-        }
-
     def compute(
         self,
         inputs: Mapping[str, torch.Tensor],
@@ -503,12 +447,7 @@ class LeapCSharedGaussianPolicyLinearLS(GaussianMixin, Model):
         if not isinstance(obs, torch.Tensor):
             obs = torch.tensor(obs, dtype=torch.float32, device=self.device)
 
-        # Use raw MPC state from inputs if available (bypasses observation normalization),
-        # otherwise extract from (potentially normalized) observations as fallback
-        if "mpc_state" in inputs:
-            state = inputs["mpc_state"]
-        else:
-            state = self._extract_state(obs)
+        state = inputs["mpc_state"]
         mean_actions = self.mpc_layer(obs, state)
 
         log_std = self.log_std_parameter
@@ -520,27 +459,3 @@ class LeapCSharedGaussianPolicyLinearLS(GaussianMixin, Model):
 
         return mean_actions, {"log_std": log_std}
 
-    def _extract_state(self, obs: torch.Tensor) -> torch.Tensor:
-        """Extract MPC state from observation (fallback when inputs["mpc_state"] unavailable).
-
-        Converts rotation matrix → RPY and body rates → Euler rates for MPC.
-        """
-        position = obs[:, self.state_indices['position']]
-        velocity = obs[:, self.state_indices['velocity']]
-
-        if 'rotation_matrix' in self.state_indices:
-            rotmat = obs[:, self.state_indices['rotation_matrix']].reshape(-1, 3, 3)
-            body_rates = obs[:, self.state_indices['body_rates']]
-            rpy = _rotation_matrix_to_euler(rotmat)
-            rpy_rates = _body_rates_to_euler_rates(rpy, body_rates)
-        elif 'attitude' in self.state_indices:
-            rpy = obs[:, self.state_indices['attitude']]
-            if 'rpy_rates' in self.state_indices:
-                rpy_rates = obs[:, self.state_indices['rpy_rates']]
-            else:
-                rpy_rates = torch.zeros(obs.shape[0], 3, device=obs.device)
-        else:
-            rpy = torch.zeros(obs.shape[0], 3, device=obs.device)
-            rpy_rates = torch.zeros(obs.shape[0], 3, device=obs.device)
-
-        return torch.cat([position, rpy, velocity, rpy_rates], dim=-1)

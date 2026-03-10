@@ -653,7 +653,7 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                         blue_win_rate = red_win_rate = 0.0
 
                     lines = [
-                        f"Episode: {episodes_completed}/{n_episodes}  Step: {world_steps[0]}",
+                        f"Episode: {episodes_completed + 1}/{n_episodes}  Step: {world_steps[0]}",
                         f"Win Rates - Blue: {blue_win_rate:.1f}%  Red: {red_win_rate:.1f}%",
                     ]
                     # Initial positions
@@ -668,6 +668,10 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                     red_status = "  ".join(f"R{i}:{'O' if red_alive[i] else 'X'} {speeds[n_blue + i]:.2f}" for i in range(len(red_alive)))
                     lines.append(f"Blue: {blue_status}")
                     lines.append(f"Red:  {red_status}")
+                    # Target assignments (which blue each red is targeting)
+                    red_targets = np.asarray(raw_env.red_target[0])
+                    target_str = "  ".join(f"R{i}->B{red_targets[i]}" for i in range(len(red_targets)))
+                    lines.append(f"Targets: {target_str}")
 
                     y_offset = 20
                     for line in lines:

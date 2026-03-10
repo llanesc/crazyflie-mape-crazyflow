@@ -6,6 +6,7 @@ uint8 MAPE_STATUS_BLUE_WON = 4
 uint8 MAPE_STATUS_RED_WON = 5
 
 uint8 status
+bool solver_ready
 
 uint8 n_evaders
 uint8 n_pursuers

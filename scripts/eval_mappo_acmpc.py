@@ -34,6 +34,8 @@ import cv2
 import imageio
 import mujoco
 import numpy as np
+os.environ.setdefault("SCIPY_ARRAY_API", "1")
+from scipy.spatial.transform import Rotation
 import torch
 from tqdm import tqdm
 
@@ -44,6 +46,7 @@ from crazyflie_mape_crazyflow.policies import (
     LeapCSharedGaussianPolicyLinearLS,
     SharedCritic,
 )
+from crazyflie_mape_crazyflow.preprocessors import PartialRunningStandardScaler
 
 
 RESULTS_DIR = Path("results/acmpc")
@@ -351,7 +354,7 @@ def load_configs(checkpoint_path: Path) -> tuple[dict, dict | None]:
 
 def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_fps=30, record_path=None,
              cam_distance=8.0, cam_azimuth=90.0, cam_elevation=-25.0, cam_lookat=(0.0, 0.0, 1.0), verbose=False,
-             obs_save_dir=None, screenshot_episode=None, screenshot_path=None):
+             obs_save_dir=None, screenshot_episode=None, screenshot_path=None, obs_preprocessors=None):
     """Run evaluation episodes and collect metrics.
 
     Args:
@@ -370,6 +373,8 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
         obs_save_dir: Directory to save observation CSV files (None to disable).
         screenshot_episode: Episode number (1-indexed) to capture as a high-res PNG.
         screenshot_path: Output path for the screenshot PNG.
+        obs_preprocessors: Optional dict mapping agent names to observation preprocessors
+            loaded from checkpoint. Applied per-agent before passing to policy.
 
     Returns:
         Dictionary of evaluation metrics.
@@ -457,8 +462,11 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
 
     # Observation collection for saving (only for world 0 when n_worlds=1)
     episode_observations = [] if obs_save_dir is not None else None
+    episode_red_states = [] if obs_save_dir is not None else None
+    episode_commands = [] if obs_save_dir is not None else None
     episode_times = [] if obs_save_dir is not None else None
     current_episode_for_obs = 1
+    n_red = env.cfg.n_red
 
     policy_times_ms = []
     env_time = 0.0
@@ -471,8 +479,17 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             for agent_name in env.possible_agents:
                 obs = obs_dict[agent_name]
                 obs_tensor = torch.tensor(obs, dtype=torch.float32, device=policy.device)
+                if obs_preprocessors is not None:
+                    obs_tensor = obs_preprocessors[agent_name](obs_tensor)
 
-                action, outputs = policy.compute({"observations": obs_tensor}, role="")
+                policy_inputs = {"observations": obs_tensor}
+                # Pass raw MPC state (bypasses observation normalization)
+                if "mpc_state" in info and agent_name in info["mpc_state"]:
+                    policy_inputs["mpc_state"] = torch.tensor(
+                        info["mpc_state"][agent_name], dtype=torch.float32, device=policy.device
+                    )
+
+                action, outputs = policy.compute(policy_inputs, role="")
                 log_std = outputs["log_std"]
                 if not deterministic:
                     std = torch.exp(log_std)
@@ -493,10 +510,25 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
             episode_observations.append(step_obs)
             episode_times.append(world_steps[0] * sim_dt)
 
-        # Step environment
+            # Collect red agent states: pos(3), vel(3), rpy(3), active(1) = 10D per red agent
+            red_pos = np.asarray(raw_env.sim.data.states.pos[0, n_blue:])  # (n_red, 3)
+            red_vel = np.asarray(raw_env.sim.data.states.vel[0, n_blue:])  # (n_red, 3)
+            red_quat = np.asarray(raw_env.sim.data.states.quat[0, n_blue:])  # (n_red, 4)
+            red_rpy = Rotation.from_quat(red_quat).as_euler('xyz')  # (n_red, 3)
+            red_alive = np.asarray(raw_env.red_alive[0]).reshape(-1, 1)  # (n_red, 1)
+            red_state = np.concatenate([red_pos, red_vel, red_rpy, red_alive], axis=-1)  # (n_red, 10)
+            episode_red_states.append(red_state)
+
+        # Step environment (commands are applied inside env.step -> _apply_controls)
         t0 = time.perf_counter()
         obs_dict, rewards, terminated, truncated, info = env.step(actions)
         env_time += time.perf_counter() - t0
+
+        # Collect commands after step (they were applied during env.step -> _apply_controls)
+        if episode_commands is not None and n_worlds == 1:
+            # attitude.cmd = [roll, pitch, yaw, thrust] for all drones (blue + red)
+            all_cmd = np.asarray(raw_env.sim.data.controls.attitude.cmd[0])  # (n_blue+n_red, 4)
+            episode_commands.append(all_cmd)
 
         # Increment per-world step counts
         world_steps += 1
@@ -595,18 +627,46 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                 n_steps_obs, n_agents_obs, obs_dim = obs_array.shape
                 obs_flat = obs_array.reshape(n_steps_obs, n_agents_obs * obs_dim)
                 time_array = np.array(episode_times).reshape(-1, 1)
-                obs_with_time = np.hstack([time_array, obs_flat])
 
                 header_cols = ['time']
                 for agent_idx in range(n_agents_obs):
                     for feat_idx in range(obs_dim):
                         header_cols.append(f"agent{agent_idx}_obs{feat_idx}")
 
+                # Append red agent state columns
+                red_state_array = np.stack(episode_red_states, axis=0)  # (n_steps, n_red, 10)
+                n_steps_red, n_red_agents, red_state_dim = red_state_array.shape
+                red_flat = red_state_array.reshape(n_steps_red, n_red_agents * red_state_dim)
+
+                red_state_names = ['pos_x', 'pos_y', 'pos_z', 'vel_x', 'vel_y', 'vel_z',
+                                   'roll', 'pitch', 'yaw', 'active']
+                for red_idx in range(n_red_agents):
+                    for name in red_state_names:
+                        header_cols.append(f"red{red_idx}_{name}")
+
+                # Append command columns: cmd_rpy(3) + cmd_thrust(1) per drone
+                cmd_array = np.stack(episode_commands, axis=0)  # (n_steps, n_blue+n_red, 4)
+                n_steps_cmd, n_total_drones, cmd_dim = cmd_array.shape
+                cmd_flat = cmd_array.reshape(n_steps_cmd, n_total_drones * cmd_dim)
+
+                cmd_names = ['cmd_roll', 'cmd_pitch', 'cmd_yaw', 'cmd_thrust']
+                for drone_idx in range(n_total_drones):
+                    if drone_idx < n_agents_obs:
+                        prefix = f"blue{drone_idx}"
+                    else:
+                        prefix = f"red{drone_idx - n_agents_obs}"
+                    for name in cmd_names:
+                        header_cols.append(f"{prefix}_{name}")
+
+                obs_with_time = np.hstack([time_array, obs_flat, red_flat, cmd_flat])
+
                 obs_file = obs_save_dir / f"ep{current_episode_for_obs:03d}_sim.csv"
                 np.savetxt(obs_file, obs_with_time, delimiter=",", header=",".join(header_cols), comments="")
                 print(f"  Saved observations to: {obs_file}")
 
                 episode_observations = []
+                episode_red_states = []
+                episode_commands = []
                 episode_times = []
                 current_episode_for_obs += 1
 
@@ -694,7 +754,7 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                         blue_win_rate = red_win_rate = 0.0
 
                     lines = [
-                        f"Episode: {episodes_completed}/{n_episodes}  Step: {world_steps[0]}",
+                        f"Episode: {episodes_completed + 1}/{n_episodes}  Step: {world_steps[0]}",
                         f"Win Rates - Blue: {blue_win_rate:.1f}%  Red: {red_win_rate:.1f}%",
                     ]
                     # Initial positions
@@ -709,6 +769,10 @@ def evaluate(env, policy, n_episodes, deterministic=False, render=False, render_
                     red_status = "  ".join(f"R{i}:{'O' if red_alive[i] else 'X'} {speeds[n_blue + i]:.2f}" for i in range(len(red_alive)))
                     lines.append(f"Blue: {blue_status}")
                     lines.append(f"Red:  {red_status}")
+                    # Target assignments (which blue each red is targeting)
+                    red_targets = np.asarray(raw_env.red_target[0])
+                    target_str = "  ".join(f"R{i}->B{red_targets[i]}" for i in range(len(red_targets)))
+                    lines.append(f"Targets: {target_str}")
 
                     y_offset = 20
                     for line in lines:
@@ -1112,6 +1176,7 @@ def main():
             mass=mass,
             gravity=env_cfg.gravity,
             drone_model=drone_model,
+            mpc_model=env_config.get("mpc_model", "so_rpy"),
             velocity_max=mpc_velocity_max,
             activation=cost_net_activation,
             pos_offset_max=pos_offset_max,
@@ -1188,6 +1253,25 @@ def main():
                       list(checkpoint[env.possible_agents[0]].keys()) if isinstance(checkpoint[env.possible_agents[0]], dict) else "not a dict")
             raise
 
+    # Load per-agent observation preprocessors if available in checkpoint
+    obs_preprocessors = {}
+    raw_env = env.env if hasattr(env, 'env') else env
+    for agent_name in env.possible_agents:
+        if agent_name in checkpoint and isinstance(checkpoint[agent_name], dict):
+            if "observation_preprocessor" in checkpoint[agent_name]:
+                pp = PartialRunningStandardScaler(
+                    size=raw_env.obs_dim,
+                    skip_dims=raw_env.obs_binary_dims,
+                    device=device,
+                )
+                pp.load_state_dict(checkpoint[agent_name]["observation_preprocessor"])
+                pp.eval()
+                obs_preprocessors[agent_name] = pp
+                print(f"Loaded observation preprocessor for {agent_name} (count={pp.current_count.item():.0f})")
+    if not obs_preprocessors:
+        print("Warning: No observation_preprocessor found in checkpoint - using raw observations")
+        obs_preprocessors = None
+
     # Set to evaluation mode and ensure on correct device
     shared_policy.to(device)
     shared_policy.eval()
@@ -1211,6 +1295,7 @@ def main():
         obs_save_dir=obs_save_dir,
         screenshot_episode=screenshot_episode,
         screenshot_path=screenshot_path,
+        obs_preprocessors=obs_preprocessors,
     )
 
     # Print results

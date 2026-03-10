@@ -21,7 +21,6 @@ import numpy as np
 from acados_template import AcadosOcp
 
 from drone_models.core import load_params
-from drone_models.so_rpy import symbolic_dynamics_euler
 from drone_models.utils.rotation import cs_rpy2matrix
 from leap_c.ocp.acados.parameters import AcadosParameter, AcadosParameterManager
 
@@ -58,6 +57,7 @@ def create_quadrotor_params_linear_ls(
     N_horizon: int = 2,
     param_interface: QuadrotorAcadosParamInterface = "global",
     drone_model: str = "cf2x_L250",
+    mpc_model: str = "so_rpy",
     roll_pitch_max: float = 0.5,
     yaw_max: float = 0.5,
     thrust_min: float | None = None,
@@ -89,7 +89,7 @@ def create_quadrotor_params_linear_ls(
         List of AcadosParameter objects.
     """
     # Load physical parameters from drone-models
-    drone_params = load_params("so_rpy", drone_model)
+    drone_params = load_params(mpc_model, drone_model)
     if mass is None:
         mass = float(drone_params["mass"])
     if gravity is None:
@@ -193,14 +193,18 @@ def get_learnable_param_dim_linear_ls(N_horizon: int, param_interface: Quadrotor
 def define_so_rpy_euler_dynamics(
     dt: float,
     drone_model: str = "cf2x_L250",
+    mpc_model: str = "so_rpy",
     mass: float | None = None,
     gravity: float | None = None,
 ) -> tuple[ca.SX, ca.SX, ca.SX]:
-    """Define discrete quadrotor dynamics using so_rpy Euler model with SX symbols.
+    """Define discrete quadrotor dynamics using so_rpy-family Euler models with SX symbols.
 
-    Uses the fitted so_rpy Euler model which has linear second-order attitude dynamics
-    with Euler angle representation (no quaternion normalization needed).
+    Uses fitted linear second-order attitude dynamics with Euler angle representation.
     Integration is performed using explicit RK4 for improved accuracy.
+
+    Supported mpc_model values (all NX=12, no rotor state):
+    - "so_rpy": Base model without drag.
+    - "so_rpy_rotor_drag": Adds aerodynamic drag to velocity dynamics.
 
     State: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
     Control: [roll_cmd, pitch_cmd, yaw_cmd, thrust]
@@ -208,14 +212,19 @@ def define_so_rpy_euler_dynamics(
     Args:
         dt: Integration timestep [s].
         drone_model: Drone model identifier for parameter loading.
+        mpc_model: Physics model for MPC dynamics ("so_rpy" or "so_rpy_rotor_drag").
         mass: Drone mass [kg]. None to load from drone_model.
         gravity: Gravitational acceleration [m/s^2]. None to load from drone_model.
 
     Returns:
         Tuple of (x_next, x, u) CasADi SX expressions.
     """
-    # Load drone parameters
-    params = load_params("so_rpy", drone_model)
+    _VALID_MPC_MODELS = ("so_rpy", "so_rpy_rotor_drag")
+    if mpc_model not in _VALID_MPC_MODELS:
+        raise ValueError(f"mpc_model must be one of {_VALID_MPC_MODELS}, got '{mpc_model}'")
+
+    # Load drone parameters from the selected model
+    params = load_params(mpc_model, drone_model)
     if mass is None:
         mass = float(params["mass"])
     if gravity is None:
@@ -253,10 +262,15 @@ def define_so_rpy_euler_dynamics(
     # RPY dynamics: rpy_dot = drpy
     rpy_dot = drpy
 
-    # Velocity dynamics: vel_dot = R @ [0, 0, thrust_z/mass]^T + gravity_vec
+    # Velocity dynamics: vel_dot = R @ [0, 0, thrust_z/mass]^T + gravity_vec [+ drag]
     thrust_z = acc_coef + cmd_f_coef * thrust
     thrust_body = ca.vertcat(0, 0, thrust_z / mass)
     vel_dot = R @ thrust_body + ca.vertcat(0, 0, -gravity)
+
+    # Add aerodynamic drag if using so_rpy_rotor_drag model
+    if mpc_model == "so_rpy_rotor_drag":
+        drag_matrix = np.array(params["drag_matrix"])
+        vel_dot = vel_dot + (1.0 / mass) * R @ drag_matrix @ R.T @ vel
 
     # RPY rates dynamics (second-order linear)
     cmd_rpy = ca.vertcat(roll_cmd, pitch_cmd, yaw_cmd)
@@ -283,6 +297,7 @@ def export_parametric_ocp_linear_ls(
     T_horizon: float = 0.02,
     dt: float = 0.01,
     drone_model: str = "cf2x_L250",
+    mpc_model: str = "so_rpy",
     velocity_max: float | None = None,
     roll_pitch_max: float = 0.5,
     yaw_max: float = 0.5,
@@ -333,7 +348,7 @@ def export_parametric_ocp_linear_ls(
     ocp.dims.nu = NU
 
     # Get symbolic dynamics
-    x_next, x, u = define_so_rpy_euler_dynamics(dt, drone_model, mass=mass, gravity=gravity)
+    x_next, x, u = define_so_rpy_euler_dynamics(dt, drone_model, mpc_model=mpc_model, mass=mass, gravity=gravity)
 
     # Assign state and control symbols
     ocp.model.x = x
@@ -379,7 +394,7 @@ def export_parametric_ocp_linear_ls(
 
     # Load physical parameters for thrust constraints if not provided
     if thrust_min is None or thrust_max is None:
-        drone_params = load_params("so_rpy", drone_model)
+        drone_params = load_params(mpc_model, drone_model)
         if thrust_min is None:
             thrust_min = float(drone_params["thrust_min"]) * 4
         if thrust_max is None:

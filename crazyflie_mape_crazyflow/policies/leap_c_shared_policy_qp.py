@@ -31,50 +31,6 @@ from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp_qp import (
 )
 
 
-def _rotation_matrix_to_euler(rotmat: torch.Tensor) -> torch.Tensor:
-    """Convert rotation matrix to RPY Euler angles (XYZ intrinsic convention).
-
-    Args:
-        rotmat: Rotation matrices, shape (..., 3, 3).
-
-    Returns:
-        RPY angles [roll, pitch, yaw], shape (..., 3).
-    """
-    # Extract Euler angles from rotation matrix (XYZ intrinsic = ZYX extrinsic)
-    sy = torch.sqrt(rotmat[..., 0, 0] ** 2 + rotmat[..., 1, 0] ** 2)
-    pitch = torch.atan2(-rotmat[..., 2, 0], sy)
-    roll = torch.atan2(rotmat[..., 2, 1], rotmat[..., 2, 2])
-    yaw = torch.atan2(rotmat[..., 1, 0], rotmat[..., 0, 0])
-    return torch.stack([roll, pitch, yaw], dim=-1)
-
-
-def _body_rates_to_euler_rates(rpy: torch.Tensor, body_rates: torch.Tensor) -> torch.Tensor:
-    """Convert body angular velocity [p, q, r] to Euler rates [droll, dpitch, dyaw].
-
-    Args:
-        rpy: RPY angles, shape (..., 3).
-        body_rates: Body angular velocity [p, q, r], shape (..., 3).
-
-    Returns:
-        Euler rates [droll, dpitch, dyaw], shape (..., 3).
-    """
-    phi = rpy[..., 0]    # roll
-    theta = rpy[..., 1]  # pitch
-    p = body_rates[..., 0]
-    q = body_rates[..., 1]
-    r = body_rates[..., 2]
-
-    cos_phi = torch.cos(phi)
-    sin_phi = torch.sin(phi)
-    cos_theta = torch.cos(theta)
-    tan_theta = torch.tan(theta)
-
-    droll = p + sin_phi * tan_theta * q + cos_phi * tan_theta * r
-    dpitch = cos_phi * q - sin_phi * r
-    dyaw = (sin_phi / cos_theta) * q + (cos_phi / cos_theta) * r
-    return torch.stack([droll, dpitch, dyaw], dim=-1)
-
-
 def get_activation(name: str) -> nn.Module:
     """Get activation module by name.
 
@@ -350,7 +306,6 @@ class LeapCSharedGaussianPolicyQP(GaussianMixin, Model):
         mpc_horizon: int = 2,
         mpc_dt: float = 0.01,
         hidden_dim: int = 256,
-        state_indices: Optional[dict] = None,
         roll_pitch_max: float = 0.5,
         yaw_max: float = 0.1,
         thrust_min: float = 1.23,
@@ -379,7 +334,6 @@ class LeapCSharedGaussianPolicyQP(GaussianMixin, Model):
             mpc_horizon: MPC prediction horizon.
             mpc_dt: MPC timestep [s].
             hidden_dim: Hidden layer dimension.
-            state_indices: Dictionary mapping state components to observation indices.
             roll_pitch_max: Maximum roll/pitch command in rad.
             yaw_max: Maximum yaw command in rad.
             thrust_min: Minimum collective thrust [N].
@@ -409,7 +363,6 @@ class LeapCSharedGaussianPolicyQP(GaussianMixin, Model):
 
         self.mpc_horizon = mpc_horizon
         self.mpc_dt = mpc_dt
-        self.state_indices = state_indices or self._default_state_indices()
 
         # Get dimensions
         obs_dim = gymnasium.spaces.flatdim(observation_space)
@@ -451,25 +404,6 @@ class LeapCSharedGaussianPolicyQP(GaussianMixin, Model):
             )
         self.log_std_parameter = nn.Parameter(initial_log_std_tensor)
 
-    def _default_state_indices(self) -> dict:
-        """Default state indices for RedVsBlueEnv observation format.
-
-        The observation format is:
-        - [0:3] = position (x, y, z)
-        - [3:6] = velocity (vx, vy, vz)
-        - [6:15] = rotation matrix (flattened 3x3)
-        - [15:18] = body angular velocity (p, q, r)
-
-        Returns:
-            Dictionary with indices for position, velocity, rotation matrix, and body rates.
-        """
-        return {
-            'position': [0, 1, 2],
-            'velocity': [3, 4, 5],
-            'rotation_matrix': [6, 7, 8, 9, 10, 11, 12, 13, 14],
-            'body_rates': [15, 16, 17],
-        }
-
     def compute(
         self,
         inputs: Mapping[str, torch.Tensor],
@@ -491,12 +425,7 @@ class LeapCSharedGaussianPolicyQP(GaussianMixin, Model):
         if not isinstance(obs, torch.Tensor):
             obs = torch.tensor(obs, dtype=torch.float32, device=self.device)
 
-        # Use raw MPC state from inputs if available (bypasses observation normalization),
-        # otherwise extract from (potentially normalized) observations as fallback
-        if "mpc_state" in inputs:
-            state = inputs["mpc_state"]
-        else:
-            state = self._extract_state(obs)
+        state = inputs["mpc_state"]
 
         # Get mean action from MPC (uses hover as initial guess internally)
         mean_actions = self.mpc_layer(obs, state)
@@ -513,36 +442,3 @@ class LeapCSharedGaussianPolicyQP(GaussianMixin, Model):
         # SKRL 2.0: return (mean_actions, outputs_dict) with "log_std" in outputs
         return mean_actions, {"log_std": log_std}
 
-    def _extract_state(self, obs: torch.Tensor) -> torch.Tensor:
-        """Extract MPC state from observation (fallback when inputs["mpc_state"] unavailable).
-
-        Converts rotation matrix → RPY and body rates → Euler rates for MPC.
-
-        Args:
-            obs: Full observation tensor.
-
-        Returns:
-            MPC state [pos, rpy, vel, drpy] with shape (B, 12).
-        """
-        position = obs[:, self.state_indices['position']]
-        velocity = obs[:, self.state_indices['velocity']]
-
-        if 'rotation_matrix' in self.state_indices:
-            # New format: rotation matrix + body rates → convert to RPY + Euler rates
-            rotmat = obs[:, self.state_indices['rotation_matrix']].reshape(-1, 3, 3)
-            body_rates = obs[:, self.state_indices['body_rates']]
-            rpy = _rotation_matrix_to_euler(rotmat)
-            rpy_rates = _body_rates_to_euler_rates(rpy, body_rates)
-        elif 'attitude' in self.state_indices:
-            # Legacy format: RPY directly
-            rpy = obs[:, self.state_indices['attitude']]
-            if 'rpy_rates' in self.state_indices:
-                rpy_rates = obs[:, self.state_indices['rpy_rates']]
-            else:
-                rpy_rates = torch.zeros(obs.shape[0], 3, device=obs.device)
-        else:
-            rpy = torch.zeros(obs.shape[0], 3, device=obs.device)
-            rpy_rates = torch.zeros(obs.shape[0], 3, device=obs.device)
-
-        # State: [pos, rpy, vel, drpy]
-        return torch.cat([position, rpy, velocity, rpy_rates], dim=-1)

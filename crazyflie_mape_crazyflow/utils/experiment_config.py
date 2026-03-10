@@ -281,6 +281,8 @@ def get_policy_config(config: dict, policy_type: str) -> dict:
             "initial_log_std": policy_cfg.get("initial_log_std", -1.2),
             # LINEAR_LS specific
             "pos_offset_max": policy_cfg.get("pos_offset_max", 1.0),
+            # MPC dynamics model
+            "mpc_model": policy_cfg.get("mpc_model", "so_rpy"),
         }
     elif policy_type == "ffn":
         policy_net_sizes = policy_cfg.get("policy_net_sizes", [256, 256])

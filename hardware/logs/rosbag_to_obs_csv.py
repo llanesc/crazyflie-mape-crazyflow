@@ -179,15 +179,35 @@ def compute_observation(
     return observation
 
 
-def build_header(n_agents: int, obs_dim: int) -> list:
+def extract_pursuer_state(pursuer_state) -> np.ndarray:
+    """Extract raw state vector from a pursuer state message.
+
+    Returns a 10D vector: pos(3), vel(3), rpy(3), active(1).
+
+    Args:
+        pursuer_state: A CrazyflieState message for a pursuer.
+
+    Returns:
+        State vector of shape (10,).
+    """
+    pos = np.array(pursuer_state.position)
+    vel = np.array(pursuer_state.velocity)
+    quat = np.array(pursuer_state.attitude)  # [x, y, z, w]
+    rpy = quat_to_rpy(quat)
+    active = float(pursuer_state.active)
+    return np.concatenate([pos, vel, rpy, [active]])
+
+
+def build_header(n_agents: int, obs_dim: int, n_pursuers: int = 0) -> list:
     """Build CSV header with column names matching eval script format.
 
     Uses the same naming convention as eval_mappo_ffn.py --save-obs:
-    time, agent0_obs0, agent0_obs1, ..., agentN_obsM
+    time, agent0_obs0, agent0_obs1, ..., agentN_obsM, red0_pos_x, ...
 
     Args:
         n_agents: Number of blue agents (evaders).
         obs_dim: Dimension of observation per agent.
+        n_pursuers: Number of red agents (pursuers).
 
     Returns:
         List of column names.
@@ -196,6 +216,18 @@ def build_header(n_agents: int, obs_dim: int) -> list:
     for agent_idx in range(n_agents):
         for feat_idx in range(obs_dim):
             header.append(f'agent{agent_idx}_obs{feat_idx}')
+
+    # Pursuer (red) state columns: pos(3), vel(3), rpy(3), active(1) = 10D
+    red_state_names = [
+        'pos_x', 'pos_y', 'pos_z',
+        'vel_x', 'vel_y', 'vel_z',
+        'roll', 'pitch', 'yaw',
+        'active',
+    ]
+    for red_idx in range(n_pursuers):
+        for name in red_state_names:
+            header.append(f'red{red_idx}_{name}')
+
     return header
 
 
@@ -273,6 +305,10 @@ def extract_observations_from_bag(bag_path: Path) -> tuple[np.ndarray, list, str
                 )
                 row.extend(obs)
 
+            # Extract raw state for all pursuers (red agents)
+            for pursuer in msg.cf_pursuer_states:
+                row.extend(extract_pursuer_state(pursuer))
+
             observations.append(row)
 
     if not observations:
@@ -283,7 +319,7 @@ def extract_observations_from_bag(bag_path: Path) -> tuple[np.ndarray, list, str
 
     # Build data array with time column
     data = np.column_stack([timestamps, observations])
-    header = build_header(n_evaders, obs_dim)
+    header = build_header(n_evaders, obs_dim, n_pursuers)
 
     return data, header, game_outcome
 

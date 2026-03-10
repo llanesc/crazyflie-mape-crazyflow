@@ -22,39 +22,31 @@ from drone_models.core import load_params
 
 
 # =============================================================================
-# CONFIGURATION PARAMETERS - Edit these to change experiment setup
+# DEFAULT CONFIGURATION VALUES
+# =============================================================================
+# These defaults are used when values are not provided via config dict
+# (i.e. mape_config.yaml). Prefer editing mape_config.yaml instead.
 # =============================================================================
 
-# Initial positions [x, y, z] for each drone after takeoff
-# Blue team (evaders)
-BLUE_INITIAL_POS = np.array([
-    [0.02, -0.57, 1.01],   # blue_1: [x, y, z]
-    [0.01, 0.41, 0.90],   # blue_2: [x, y, z]
+_DEFAULT_BLUE_INITIAL_POS = np.array([
+    [0.02, -0.57, 1.01],
+    [0.01,  0.41, 0.90],
 ])
 
-# Red team (pursuers)
-RED_INITIAL_POS = np.array([
-    [3.48, -0.65, 0.81],  # red_1: [x, y, z]
-    [2.58, 0.25, 0.95],  # red_2: [x, y, z]
+_DEFAULT_RED_INITIAL_POS = np.array([
+    [3.48, -0.65, 0.81],
+    [2.58,  0.25, 0.95],
 ])
 
-# Takeoff transition thresholds
-ALTITUDE_THRESHOLD = 0.05   # m - how close to target altitude before switching to low-level
-VELOCITY_THRESHOLD = 0.05   # m/s - max velocity magnitude before switching to low-level
-TAKEOFF_DURATION = 3.0      # seconds for takeoff maneuver
-
-# Attitude limits
-ROLL_PITCH_MAX = 0.2  # rad (~11.5 deg)
-YAW_MAX = 0.1         # rad (~5.7 deg)
-
-# Inactive agent settling threshold
-SETTLING_VELOCITY_THRESHOLD = 0.2  # m/s - velocity below which to lock hover position
-
-# PID hover control parameters (integral for Z-axis only)
-HOVER_KI_Z = 6.0         # Integral gain for Z-axis hover
-HOVER_INTEGRAL_CAP = 1.0  # Cap on integral term (m*s) to prevent windup
-
-# =============================================================================
+_DEFAULT_ALTITUDE_THRESHOLD = 0.05
+_DEFAULT_VELOCITY_THRESHOLD = 0.05
+_DEFAULT_TAKEOFF_DURATION = 3.0
+_DEFAULT_ROLL_PITCH_MAX = 0.2
+_DEFAULT_YAW_MAX = 0.1
+_DEFAULT_SETTLING_VELOCITY_THRESHOLD = 0.2
+_DEFAULT_HOVER_KI_Z = 6.0
+_DEFAULT_HOVER_INTEGRAL_CAP = 1.0
+_DEFAULT_BRAKING_VEL_MULTIPLIER = 3.0
 
 
 def quat_to_rotmat(x: float, y: float, z: float, w: float) -> np.ndarray:
@@ -140,17 +132,19 @@ class TeamBase(Node):
         self.thrust_min = config.get('thrust_min', self.mass * self.gravity * 0.5)
         self.thrust_max = config.get('thrust_max', self.mass * self.gravity * 1.5)
 
-        # Use global configuration for initial positions
-        self.blue_initial_pos = BLUE_INITIAL_POS.copy()
-        self.red_initial_pos = RED_INITIAL_POS.copy()
+        # Initial positions from config (mape_config.yaml), with defaults
+        blue_pos = config.get('blue_initial_pos', _DEFAULT_BLUE_INITIAL_POS)
+        red_pos = config.get('red_initial_pos', _DEFAULT_RED_INITIAL_POS)
+        self.blue_initial_pos = np.array(blue_pos, dtype=np.float64).copy()
+        self.red_initial_pos = np.array(red_pos, dtype=np.float64).copy()
 
         # Heights for takeoff command (high-level commander uses these)
         self.blue_initial_height = self.blue_initial_pos[:, 2].tolist()
         self.red_initial_height = self.red_initial_pos[:, 2].tolist()
 
-        # Attitude limits from global config
-        self.roll_pitch_max = config.get('roll_pitch_max', ROLL_PITCH_MAX)
-        self.yaw_max = config.get('yaw_max', YAW_MAX)
+        # Attitude limits from config
+        self.roll_pitch_max = config.get('roll_pitch_max', _DEFAULT_ROLL_PITCH_MAX)
+        self.yaw_max = config.get('yaw_max', _DEFAULT_YAW_MAX)
 
         # Thrust-to-PWM parameters (linear mapping matching Mellinger controller)
         self.pwm_max = 65535
@@ -162,21 +156,22 @@ class TeamBase(Node):
         self.team_initialized = False
         self.initialized_control = False
 
-        # Takeoff and low-level control state from global config
+        # Takeoff and low-level control state from config
         self.takeoff_commanded = False
         self.low_level_enabled = False
-        self.altitude_threshold = ALTITUDE_THRESHOLD
-        self.velocity_threshold = VELOCITY_THRESHOLD
-        self.takeoff_duration_sec = TAKEOFF_DURATION
+        self.altitude_threshold = config.get('altitude_threshold', _DEFAULT_ALTITUDE_THRESHOLD)
+        self.velocity_threshold = config.get('velocity_threshold', _DEFAULT_VELOCITY_THRESHOLD)
+        self.takeoff_duration_sec = config.get('takeoff_duration', _DEFAULT_TAKEOFF_DURATION)
 
         # Settling state for inactive agents (initialized in initialize_team)
-        self.settling_velocity_threshold = SETTLING_VELOCITY_THRESHOLD
+        self.settling_velocity_threshold = config.get('settling_velocity_threshold', _DEFAULT_SETTLING_VELOCITY_THRESHOLD)
         self.agent_settled = None  # Bool array: True if agent has settled (velocity below threshold)
         self.settled_pos = None    # Position where agent settled
 
         # PID hover control state (Z-axis integral)
-        self.hover_ki_z = HOVER_KI_Z
-        self.hover_integral_cap = HOVER_INTEGRAL_CAP
+        self.hover_ki_z = config.get('hover_ki_z', _DEFAULT_HOVER_KI_Z)
+        self.hover_integral_cap = config.get('hover_integral_cap', _DEFAULT_HOVER_INTEGRAL_CAP)
+        self.braking_vel_multiplier = config.get('braking_vel_multiplier', _DEFAULT_BRAKING_VEL_MULTIPLIER)
         self.z_error_integral = None  # Accumulated Z position error integral
         self.last_control_time = None  # For computing dt
 
@@ -299,20 +294,41 @@ class TeamBase(Node):
         else:
             self.get_logger().warn('ready_for_low_level service not available')
 
-    def cmd_attitude_setpoint(self, control: np.ndarray, index: int):
+    def cmd_attitude_setpoint(self, control: np.ndarray, index: int,
+                              current_yaw: float = 0.0):
         """Publish attitude setpoint command.
 
         Args:
             control: [roll_rad, pitch_rad, yaw_rad, thrust_N] in physical units.
             index: Agent index in team.
+            current_yaw: Current yaw angle in radians for yaw tracking.
         """
-        roll_rad, pitch_rad, yaw_rad, thrust_N = control.ravel()
+        roll_rad, pitch_rad, yaw_des, thrust_N = control.ravel()
+
+        # PID controller: convert desired yaw angle to yaw rate
+        yaw_error = yaw_des - current_yaw
+        # Wrap to [-pi, pi]
+        yaw_error = (yaw_error + np.pi) % (2 * np.pi) - np.pi
+        kP_yaw = 2.5
+        kD_yaw = 0.5
+        kI_yaw = 0.3
+        dt = 0.02  # ~50Hz control loop
+        if not hasattr(self, '_prev_yaw_error'):
+            self._prev_yaw_error = {}
+        if not hasattr(self, '_yaw_error_integral'):
+            self._yaw_error_integral = {}
+        prev_error = self._prev_yaw_error.get(index, yaw_error)
+        integral = self._yaw_error_integral.get(index, 0.0)
+        integral = np.clip(integral + yaw_error * dt, -0.5, 0.5)
+        d_error = (yaw_error - prev_error) / dt
+        self._prev_yaw_error[index] = yaw_error
+        self._yaw_error_integral[index] = integral
+        yaw_rate = -kP_yaw * yaw_error - kD_yaw * d_error - kI_yaw * integral
 
         setpoint = AttitudeSetpoint()
         setpoint.roll = roll_rad
         setpoint.pitch = pitch_rad
-        # Yaw treated as yaw_rate for hardware (degrees/s)
-        setpoint.yaw_rate = 0
+        setpoint.yaw_rate = yaw_rate
         setpoint.thrust = self.thrust_to_pwm(thrust_N)
 
         self.attitude_setpoint_publishers[index].publish(setpoint)
@@ -520,8 +536,10 @@ class PursuerTeam(TeamBase):
 
         controls = self.compute_control(red_states, blue_states, status)
 
+        red_states_np = self.states_to_np(red_states)
         for n in range(self.team_size):
-            self.cmd_attitude_setpoint(controls[n, :], n)
+            current_yaw = red_states_np[n, 8]
+            self.cmd_attitude_setpoint(controls[n, :], n, current_yaw=current_yaw)
 
     def compute_control(self, red_states: list, blue_states: list, status: int) -> np.ndarray:
         """Compute control for all pursuers.
@@ -583,21 +601,41 @@ class PursuerTeam(TeamBase):
 
                 # Build target positions for inactive agents
                 inactive_target_pos = np.zeros_like(inactive_pos)
+                # Track which inactive agents need braking (not yet settled)
+                needs_braking = np.zeros(len(inactive_indices), dtype=bool)
                 for i, idx in enumerate(inactive_indices):
                     if self.agent_settled[idx]:
                         # Use settled position for hover
                         inactive_target_pos[i] = self.settled_pos[idx]
                     else:
-                        # Use current position to slow down
-                        inactive_target_pos[i] = inactive_pos[i]
+                        # Use deactivation position (last active frame) as fixed reference
+                        # so the PID has position error to maintain altitude
+                        inactive_target_pos[i] = self.initial_pos[idx]
+                        needs_braking[i] = True
 
-                controls_inactive = self._pid_control(
-                    red_states_np[inactive_agents, :],
-                    inactive_target_pos,
-                    np.zeros_like(inactive_target_pos),
-                    agent_indices=inactive_indices
-                )
-                controls[inactive_agents, :] = controls_inactive
+                # Settled agents: gentle PID hover
+                if np.any(~needs_braking):
+                    settled_mask = ~needs_braking
+                    settled_idx = inactive_indices[settled_mask]
+                    controls_settled = self._pid_control(
+                        red_states_np[settled_idx, :],
+                        inactive_target_pos[settled_mask],
+                        np.zeros_like(inactive_target_pos[settled_mask]),
+                        agent_indices=settled_idx
+                    )
+                    controls[settled_idx, :] = controls_settled
+
+                # Unsettled agents: aggressive braking
+                if np.any(needs_braking):
+                    braking_idx = inactive_indices[needs_braking]
+                    controls_braking = self._pid_control(
+                        red_states_np[braking_idx, :],
+                        inactive_target_pos[needs_braking],
+                        np.zeros_like(inactive_target_pos[needs_braking]),
+                        agent_indices=braking_idx,
+                        braking=True
+                    )
+                    controls[braking_idx, :] = controls_braking
 
             if np.any(active_agents):
                 if self.pursuer_strategy == "PP":
@@ -913,7 +951,8 @@ class PursuerTeam(TeamBase):
         return self._clip_and_pack(rpy_des, thrust_des)
 
     def _pid_control(self, states: np.ndarray, target_pos: np.ndarray,
-                     target_vel: np.ndarray, agent_indices: np.ndarray = None) -> np.ndarray:
+                     target_vel: np.ndarray, agent_indices: np.ndarray = None,
+                     braking: bool = False) -> np.ndarray:
         """PID position control for hover.
 
         Uses PD control for XY axes and PID control for Z axis to eliminate
@@ -926,6 +965,8 @@ class PursuerTeam(TeamBase):
             agent_indices: Optional indices of agents being controlled. If None,
                 assumes all agents [0, 1, ..., n-1]. Required when controlling
                 a subset of agents to correctly update per-agent integral state.
+            braking: If True, amplify velocity damping gains by
+                braking_vel_multiplier for more aggressive deceleration.
 
         Returns:
             Control array [roll, pitch, yaw, thrust], shape (n, 4).
@@ -960,6 +1001,12 @@ class PursuerTeam(TeamBase):
 
         # PD acceleration from pure pursuit
         accel = self._pure_pursuit(pos_rb, vel_rb)
+
+        # Amplify velocity damping for aggressive braking
+        if braking:
+            extra_vel_accel = (self.braking_vel_multiplier - 1.0) * vel_rb
+            accel[:, :2] += self.k_vxy * extra_vel_accel[:, :2]
+            accel[:, 2:3] += self.k_vz * extra_vel_accel[:, 2:3]
 
         # Add integral term to Z acceleration (use indices to get correct integral values)
         accel[:, 2] = accel[:, 2] + self.hover_ki_z * self.z_error_integral[agent_indices]
@@ -1078,8 +1125,10 @@ class EvaderTeam(TeamBase):
 
         controls = self.compute_control(blue_states, red_states, status)
 
+        blue_states_np = self.states_to_np(blue_states)
         for n in range(self.team_size):
-            self.cmd_attitude_setpoint(controls[n, :], n)
+            current_yaw = blue_states_np[n, 8]
+            self.cmd_attitude_setpoint(controls[n, :], n, current_yaw=current_yaw)
 
     def compute_control(self, blue_states: list, red_states: list, status: int) -> np.ndarray:
         """Compute control for all evaders.
@@ -1135,20 +1184,41 @@ class EvaderTeam(TeamBase):
 
                 # Build target positions for inactive agents
                 inactive_target_pos = np.zeros_like(inactive_pos)
+                # Track which inactive agents need braking (not yet settled)
+                needs_braking = np.zeros(len(inactive_indices), dtype=bool)
                 for i, idx in enumerate(inactive_indices):
                     if self.agent_settled[idx]:
                         # Use settled position for hover
                         inactive_target_pos[i] = self.settled_pos[idx]
                     else:
-                        # Use current position to slow down
-                        inactive_target_pos[i] = inactive_pos[i]
+                        # Use deactivation position (last active frame) as fixed reference
+                        # so the PID has position error to maintain altitude
+                        inactive_target_pos[i] = self.initial_pos[idx]
+                        needs_braking[i] = True
 
-                blue_10d = self._extract_pid_states(blue_states_np[inactive_agents])
-                controls_inactive = self._pid_control(
-                    blue_10d, inactive_target_pos, np.zeros_like(inactive_target_pos),
-                    agent_indices=inactive_indices
-                )
-                controls[inactive_agents, :] = controls_inactive
+                # Settled agents: gentle PID hover
+                if np.any(~needs_braking):
+                    settled_mask = ~needs_braking
+                    settled_idx = inactive_indices[settled_mask]
+                    blue_10d = self._extract_pid_states(blue_states_np[settled_idx])
+                    controls_settled = self._pid_control(
+                        blue_10d, inactive_target_pos[settled_mask],
+                        np.zeros_like(inactive_target_pos[settled_mask]),
+                        agent_indices=settled_idx
+                    )
+                    controls[settled_idx, :] = controls_settled
+
+                # Unsettled agents: aggressive braking
+                if np.any(needs_braking):
+                    braking_idx = inactive_indices[needs_braking]
+                    blue_10d = self._extract_pid_states(blue_states_np[braking_idx])
+                    controls_braking = self._pid_control(
+                        blue_10d, inactive_target_pos[needs_braking],
+                        np.zeros_like(inactive_target_pos[needs_braking]),
+                        agent_indices=braking_idx,
+                        braking=True
+                    )
+                    controls[braking_idx, :] = controls_braking
 
             if np.any(active_agents) and self.policy is not None:
                 controls_active = self._policy_control(
@@ -1311,16 +1381,28 @@ class EvaderTeam(TeamBase):
         with torch.no_grad():
             obs_tensor = torch.tensor(observations, dtype=torch.float32, device='cpu')
 
-            # Extract raw MPC state before normalization (for ACMPC policies)
-            raw_mpc_state = self.policy._extract_state(obs_tensor) if hasattr(self.policy, '_extract_state') else None
+            # Build raw MPC state [pos(3), rpy(3), vel(3), drpy(3)] from blue_states
+            # for ACMPC policies that need physical values (not normalized)
+            mpc_state = np.zeros((n_active, 12), dtype=np.float32)
+            for i, agent_idx in enumerate(active_indices):
+                mpc_state[i, 0:3] = blue_states[agent_idx, 0:3]   # pos
+                # Convert rotation matrix to RPY
+                R = blue_states[agent_idx, 6:15].reshape(3, 3)
+                sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+                pitch = np.arctan2(-R[2, 0], sy)
+                roll = np.arctan2(R[2, 1], R[2, 2])
+                yaw = np.arctan2(R[1, 0], R[0, 0])
+                mpc_state[i, 3:6] = [roll, pitch, yaw]            # rpy
+                mpc_state[i, 6:9] = blue_states[agent_idx, 3:6]   # vel
+                mpc_state[i, 9:12] = blue_states[agent_idx, 15:18] # body_rates (drpy)
+            mpc_state_tensor = torch.tensor(mpc_state, dtype=torch.float32, device='cpu')
 
             # Apply observation preprocessor (normalization) if available
             if self.obs_preprocessor is not None:
                 obs_tensor = self.obs_preprocessor(obs_tensor)
 
             inputs = {"observations": obs_tensor}
-            if raw_mpc_state is not None:
-                inputs["mpc_state"] = raw_mpc_state
+            inputs["mpc_state"] = mpc_state_tensor
             mean_actions, _ = self.policy.compute(inputs)
 
             if isinstance(mean_actions, torch.Tensor):

@@ -2,7 +2,8 @@
 
 Launches the server, pursuer team, and evader team nodes with configurable
 policy type (FFN or ACMPC). Checkpoints and configs are loaded from the
-models/{policy_type}/ directory.
+models/{policy_type}/ directory. Experiment parameters (initial positions,
+collision tolerances, etc.) are loaded from config/mape_config.yaml.
 """
 
 import argparse
@@ -10,21 +11,8 @@ import multiprocessing
 import os
 from pathlib import Path
 
-# =============================================================================
-# CURRICULUM LEVEL - Set this to use level-specific collision tolerances
-# =============================================================================
-# Set to None to use base config values, or an integer (0, 1, 2, ...) to use
-# parameters from that curriculum level (e.g., collision tolerances)
-CURRICULUM_LEVEL = 9  # e.g., 0, 1, 2, or None for base config
-# =============================================================================
-
-# =============================================================================
-# COLLISION TOLERANCES - Manual overrides (set to None to use config/curriculum)
-# =============================================================================
-BB_COLLISION_TOLERANCE = 0.2   # Blue-Blue collision distance (meters), or None
-RR_COLLISION_TOLERANCE = 0.2   # Red-Red collision distance (meters), or None
-RB_COLLISION_TOLERANCE = 0.2   # Red-Blue (capture) distance (meters), or None
-# =============================================================================
+import numpy as np
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -32,6 +20,96 @@ from ament_index_python.packages import get_package_share_directory
 _PACKAGE_NAME = 'multiagent_pursuit_evasion'
 
 from multiagent_pursuit_evasion.policy_loader import load_config
+
+
+def find_mape_config() -> Path:
+    """Find mape_config.yaml in the config directory.
+
+    Uses the same source-directory preference as get_models_dir().
+
+    Returns:
+        Path to mape_config.yaml.
+
+    Raises:
+        FileNotFoundError: If config file not found.
+    """
+    # 1. Environment variable override
+    if 'MAPE_CONFIG' in os.environ:
+        p = Path(os.environ['MAPE_CONFIG'])
+        if p.exists():
+            return p
+        print(f"Warning: MAPE_CONFIG={p} does not exist, trying auto-detection")
+
+    # 2. Auto-detect source directory from install path
+    file_path = Path(__file__).resolve()
+    path_str = str(file_path)
+
+    if '/install/' in path_str:
+        ws_root = Path(path_str.split('/install/')[0])
+        src_config = ws_root / 'src' / _PACKAGE_NAME / 'config' / 'mape_config.yaml'
+        if src_config.exists():
+            return src_config
+
+    # 3. Relative to __file__
+    package_dir = file_path.parent.parent
+    src_config = package_dir / 'config' / 'mape_config.yaml'
+    if src_config.exists():
+        return src_config
+
+    # 4. Installed share directory
+    try:
+        share_dir = get_package_share_directory(_PACKAGE_NAME)
+        cfg = Path(share_dir) / 'config' / 'mape_config.yaml'
+        if cfg.exists():
+            return cfg
+    except Exception:
+        pass
+
+    raise FileNotFoundError(
+        "mape_config.yaml not found. Set MAPE_CONFIG environment variable or "
+        f"ensure config/mape_config.yaml exists in src/{_PACKAGE_NAME}/"
+    )
+
+
+def load_mape_config(config_path: Path, episode_override: str = None) -> dict:
+    """Load mape_config.yaml and resolve the selected episode.
+
+    Returns a flat dict with all parameters and resolved episode positions
+    stored under 'blue_initial_pos' and 'red_initial_pos' (numpy arrays).
+
+    Args:
+        config_path: Path to mape_config.yaml.
+        episode_override: If given, overrides the active_episode from file.
+
+    Returns:
+        Dict of hardware experiment parameters.
+    """
+    with open(config_path, 'r') as f:
+        mape_cfg = yaml.safe_load(f)
+
+    # Resolve which episode to use
+    episode_name = episode_override or mape_cfg.get('active_episode', 'default')
+    episodes = mape_cfg.get('episodes', {})
+
+    if episode_name not in episodes:
+        available = ', '.join(episodes.keys())
+        raise ValueError(
+            f"Episode '{episode_name}' not found. Available episodes: {available}"
+        )
+
+    episode = episodes[episode_name]
+    print(f"Episode: {episode_name}")
+    print(f"  Blue positions: {episode['blue']}")
+    print(f"  Red positions:  {episode['red']}")
+
+    mape_cfg['blue_initial_pos'] = np.array(episode['blue'], dtype=np.float64)
+    mape_cfg['red_initial_pos'] = np.array(episode['red'], dtype=np.float64)
+    mape_cfg['active_episode'] = episode_name
+    if 'red_target' in episode:
+        mape_cfg['red_target'] = episode['red_target']
+        print(f"  Red targets:    {episode['red_target']}")
+
+    return mape_cfg
 
 
 def run_server_process(n_blue: int, n_red: int, config: dict, require_accel: bool = True):
@@ -103,6 +181,9 @@ def run_evader_process(config: dict, checkpoint_path: str, policy_type: str):
         obs_preprocessor=obs_preprocessor,
     )
 
+    # Notify server that solver is ready
+    _notify_solver_ready(evader_node, logger)
+
     executor = executors.SingleThreadedExecutor()
     executor.add_node(evader_node)
 
@@ -115,6 +196,25 @@ def run_evader_process(config: dict, checkpoint_path: str, policy_type: str):
         executor.shutdown()
         evader_node.destroy_node()
         rclpy.shutdown()
+
+
+def _notify_solver_ready(node, logger):
+    """Notify the server that the ACMPC solver is built and ready."""
+    import rclpy
+    from multiagent_pursuit_evasion_interfaces.srv import SolverReady
+
+    client = node.create_client(SolverReady, '/solver_ready')
+    if client.wait_for_service(timeout_sec=5.0):
+        request = SolverReady.Request()
+        request.ready = True
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(node, future, timeout_sec=5.0)
+        if future.result() is not None:
+            logger.info('Notified server: solver ready')
+        else:
+            logger.warn('Solver ready service call failed')
+    else:
+        logger.warn('Solver ready service not available')
 
 
 def run_pursuer_process(config: dict):
@@ -338,6 +438,12 @@ def main():
         help='Policy type: ffn or acmpc (default: ffn)'
     )
     parser.add_argument(
+        '-e', '--episode',
+        type=str,
+        default=None,
+        help='Episode name from mape_config.yaml (overrides active_episode)'
+    )
+    parser.add_argument(
         '--require-accel',
         action='store_true',
         default=False,
@@ -346,7 +452,21 @@ def main():
 
     args, _ = parser.parse_known_args()
 
-    # Find config and checkpoint BEFORE rclpy.init() (use print for early logging)
+    # ---- Load mape_config.yaml (hardware experiment parameters) ----
+    try:
+        mape_config_path = find_mape_config()
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        return 1
+
+    print(f"Loading MAPE config from: {mape_config_path}")
+    try:
+        mape_cfg = load_mape_config(mape_config_path, episode_override=args.episode)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    # ---- Load environment config and checkpoint for the policy ----
     try:
         config_path = find_config(args.policy_type)
         checkpoint_path = find_checkpoint(args.policy_type)
@@ -354,23 +474,33 @@ def main():
         print(f"Error: {e}")
         return 1
 
-    print(f"Loading config from: {config_path}")
+    print(f"Loading env config from: {config_path}")
     print(f"Loading checkpoint from: {checkpoint_path}")
     config = load_config(str(config_path))
 
-    # Apply curriculum level if specified
-    if CURRICULUM_LEVEL is not None:
-        config = apply_curriculum_level(config, CURRICULUM_LEVEL)
+    # Apply curriculum level from mape_config (if specified)
+    curriculum_level = mape_cfg.get('curriculum_level')
+    if curriculum_level is not None:
+        config = apply_curriculum_level(config, curriculum_level)
 
-    # Apply manual collision tolerance overrides (take priority over curriculum)
-    for key, value in [
-        ('bb_collision_tolerance', BB_COLLISION_TOLERANCE),
-        ('rr_collision_tolerance', RR_COLLISION_TOLERANCE),
-        ('rb_collision_tolerance', RB_COLLISION_TOLERANCE),
-    ]:
+    # Apply collision tolerance overrides from mape_config
+    for key in ('bb_collision_tolerance', 'rr_collision_tolerance', 'rb_collision_tolerance'):
+        value = mape_cfg.get(key)
         if value is not None:
             config[key] = value
-            print(f"  Override {key}: {value}")
+            print(f"  {key}: {value}")
+
+    # Merge all mape_config parameters into config so downstream nodes can access them
+    # (episode positions, takeoff thresholds, attitude limits, hover PID, etc.)
+    for key in ('blue_initial_pos', 'red_initial_pos', 'active_episode',
+                'red_target',
+                'altitude_threshold', 'velocity_threshold', 'takeoff_duration',
+                'roll_pitch_max', 'yaw_max',
+                'settling_velocity_threshold',
+                'hover_ki_z', 'hover_integral_cap',
+                'status_publisher_frequency', 'gravity'):
+        if key in mape_cfg:
+            config[key] = mape_cfg[key]
 
     n_blue = config['n_pairs']
     n_red = config['n_pairs']
@@ -402,9 +532,10 @@ def main():
     pursuer_process.start()
     print("Pursuer process started")
 
+    episode_name = mape_cfg.get('active_episode', 'default')
     print(
         f'\nMAPE experiment running: {n_blue} blue vs {n_red} red, '
-        f'policy={args.policy_type.upper()}'
+        f'policy={args.policy_type.upper()}, episode={episode_name}'
     )
     print('Press CTRL-C to shutdown\n')
 

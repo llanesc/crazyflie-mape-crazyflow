@@ -164,6 +164,7 @@ class QuadrotorPlannerConfig:
     n_batch_max: int = 4096
     num_threads: int = 8
     drone_model: str = "cf2x_L250"
+    mpc_model: str = "so_rpy"  # "so_rpy" or "so_rpy_rotor_drag"
     velocity_max: float | None = None  # m/s, None to disable
     roll_pitch_max: float = 0.5
     yaw_max: float = 0.1
@@ -218,7 +219,7 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         self.cfg = QuadrotorPlannerConfig() if cfg is None else cfg
 
         # Load drone physical parameters from drone-models
-        self.drone_params = load_params("so_rpy", self.cfg.drone_model)
+        self.drone_params = load_params(self.cfg.mpc_model, self.cfg.drone_model)
 
         # Import correct OCP module based on cost type
         if self.cfg.cost_type == "qp":
@@ -239,19 +240,40 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         # Store get_learnable_param_dim for later use
         self._get_learnable_param_dim = get_learnable_param_dim
 
+        # Build kwargs shared by both cost types
+        param_kwargs = dict(
+            N_horizon=self.cfg.N_horizon,
+            param_interface=self.cfg.param_interface,
+            drone_model=self.cfg.drone_model,
+            roll_pitch_max=self.cfg.roll_pitch_max,
+            yaw_max=self.cfg.yaw_max,
+            thrust_min=self.cfg.thrust_min,
+            thrust_max=self.cfg.thrust_max,
+            mass=self.cfg.mass,
+            gravity=self.cfg.gravity,
+        )
+        ocp_kwargs = dict(
+            name=ocp_name,
+            N_horizon=self.cfg.N_horizon,
+            T_horizon=self.cfg.T_horizon,
+            dt=self.cfg.dt,
+            drone_model=self.cfg.drone_model,
+            velocity_max=self.cfg.velocity_max,
+            roll_pitch_max=self.cfg.roll_pitch_max,
+            yaw_max=self.cfg.yaw_max,
+            thrust_min=self.cfg.thrust_min,
+            thrust_max=self.cfg.thrust_max,
+            mass=self.cfg.mass,
+            gravity=self.cfg.gravity,
+        )
+        # linear_ls supports mpc_model selection
+        if self.cfg.cost_type == "linear_ls":
+            param_kwargs["mpc_model"] = self.cfg.mpc_model
+            ocp_kwargs["mpc_model"] = self.cfg.mpc_model
+
         # Create parameters
         params = (
-            create_quadrotor_params(
-                N_horizon=self.cfg.N_horizon,
-                param_interface=self.cfg.param_interface,
-                drone_model=self.cfg.drone_model,
-                roll_pitch_max=self.cfg.roll_pitch_max,
-                yaw_max=self.cfg.yaw_max,
-                thrust_min=self.cfg.thrust_min,
-                thrust_max=self.cfg.thrust_max,
-                mass=self.cfg.mass,
-                gravity=self.cfg.gravity,
-            )
+            create_quadrotor_params(**param_kwargs)
             if params is None
             else params
         )
@@ -265,18 +287,7 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         # Create OCP
         ocp = export_parametric_ocp(
             param_manager=param_manager,
-            name=ocp_name,
-            N_horizon=self.cfg.N_horizon,
-            T_horizon=self.cfg.T_horizon,
-            dt=self.cfg.dt,
-            drone_model=self.cfg.drone_model,
-            velocity_max=self.cfg.velocity_max,
-            roll_pitch_max=self.cfg.roll_pitch_max,
-            yaw_max=self.cfg.yaw_max,
-            thrust_min=self.cfg.thrust_min,
-            thrust_max=self.cfg.thrust_max,
-            mass=self.cfg.mass,
-            gravity=self.cfg.gravity,
+            **ocp_kwargs,
         )
 
         # Create hover initializer for solver warm-start

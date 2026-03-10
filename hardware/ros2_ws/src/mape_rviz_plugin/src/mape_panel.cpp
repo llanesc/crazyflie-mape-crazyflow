@@ -159,15 +159,21 @@ void MapePanel::setupUI()
   // System Status Section
   // =========================================================================
   auto * status_group = new QGroupBox("System Status", this);
-  auto * status_layout = new QHBoxLayout(status_group);
+  auto * status_layout = new QGridLayout(status_group);
 
   system_status_label_ = new QLabel("Status:", this);
   status_value_label_ = new QLabel("DISCONNECTED", this);
   status_value_label_->setStyleSheet("font-weight: bold; color: gray;");
 
-  status_layout->addWidget(system_status_label_);
-  status_layout->addWidget(status_value_label_);
-  status_layout->addStretch();
+  solver_status_label_ = new QLabel("Solver:", this);
+  solver_value_label_ = new QLabel("NOT READY", this);
+  solver_value_label_->setStyleSheet("font-weight: bold; color: gray;");
+
+  status_layout->addWidget(system_status_label_, 0, 0);
+  status_layout->addWidget(status_value_label_, 0, 1);
+  status_layout->addWidget(solver_status_label_, 1, 0);
+  status_layout->addWidget(solver_value_label_, 1, 1);
+  status_layout->setColumnStretch(2, 1);
 
   main_layout_->addWidget(status_group);
 
@@ -280,10 +286,21 @@ void MapePanel::updateUI()
   if (!status) {
     status_value_label_->setText("DISCONNECTED");
     status_value_label_->setStyleSheet("font-weight: bold; color: gray;");
+    solver_value_label_->setText("NOT READY");
+    solver_value_label_->setStyleSheet("font-weight: bold; color: gray;");
     takeoff_button_->setEnabled(false);
     run_button_->setEnabled(false);
     off_button_->setEnabled(false);
     return;
+  }
+
+  // Update solver status display
+  if (status->solver_ready) {
+    solver_value_label_->setText("READY");
+    solver_value_label_->setStyleSheet("font-weight: bold; color: #4CAF50;");
+  } else {
+    solver_value_label_->setText("BUILDING...");
+    solver_value_label_->setStyleSheet("font-weight: bold; color: #FF9800;");
   }
 
   // Update system status display
@@ -291,7 +308,7 @@ void MapePanel::updateUI()
     case STATUS_OFF:
       status_value_label_->setText("OFF");
       status_value_label_->setStyleSheet("font-weight: bold; color: #666;");
-      takeoff_button_->setEnabled(true);
+      takeoff_button_->setEnabled(status->solver_ready);
       run_button_->setEnabled(false);
       off_button_->setEnabled(false);
       break;

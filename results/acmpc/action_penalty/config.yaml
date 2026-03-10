@@ -55,9 +55,9 @@ environment:
   random_target_assignment: true  # true for random, false for deterministic (red_i -> blue_i)
 
   # Physical parameters (optional overrides)
-  mass: 0.0406  # Override drone mass [kg], if not set uses drone_model default
-  thrust_min: 0.1991  # 0.5 * 0.0406 * 9.81 [N]
-  thrust_max: 0.5974  # 1.5 * 0.0406 * 9.81 [N]
+  mass: 0.0418  # Override drone mass [kg], if not set uses drone_model default
+  thrust_min: 0.205029  # 0.5 * 0.0418 * 9.81 [N]
+  thrust_max: 0.615087  # 1.5 * 0.0418 * 9.81 [N]
 
   # Domain randomization
   randomize_mass: false  # Randomize mass with normal distribution
@@ -77,7 +77,8 @@ policy:
   pos_offset_max: 0.25  # Max position reference offset [m] (LINEAR_LS only)
 
   # MPC settings
-  mpc_horizon: 5
+  mpc_model: "so_rpy_rotor_drag"  # "so_rpy" or "so_rpy_rotor_drag"
+  mpc_horizon: 2
   mpc_dt: 0.02
   mpc_velocity_max: null  # null to disable, or float value in m/s
 
@@ -118,8 +119,8 @@ training:
 
   # Preprocessors (optional)
   # Options: "RunningStandardScaler" or null (no preprocessing)
-  observation_preprocessor: "RunningStandardScaler"
-  state_preprocessor: "RunningStandardScaler"
+  observation_preprocessor: null
+  state_preprocessor: null
   value_preprocessor: "RunningStandardScaler"
 
   # Learning rate scheduler (optional)
@@ -409,10 +410,10 @@ curriculum:
       # Domain randomization
       randomize_mass: true  # Randomize mass with normal distribution
       randomize_inertia: true  # Randomize inertia with normal distribution
-      mass_randomization_std: 0.002  # Standard deviation for mass randomization [kg]
+      mass_randomization_std: 0.004  # Standard deviation for mass randomization [kg]
       inertia_randomization_std: 1.0e-6  # Standard deviation for inertia randomization [kg*m^2]
       # Disturbance forces/torques
       enable_disturbance: true  # Enable random disturbance forces and torques
-      disturbance_force_std: 0.005  # Standard deviation for force disturbance [N]
-      disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]
+      disturbance_force_std: 0.01  # Standard deviation for force disturbance [N]
+      disturbance_torque_std: 9.0e-5  # Standard deviation for torque disturbance [Nm]
 

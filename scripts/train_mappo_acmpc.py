@@ -578,6 +578,8 @@ def main():
         "value_activation": policy_cfg["value_activation"],
         # LINEAR_LS specific (only used when cost_type == "linear_ls")
         "pos_offset_max": policy_cfg["pos_offset_max"],
+        # MPC dynamics model
+        "mpc_model": policy_cfg.get("mpc_model", "so_rpy"),
         # Frequencies
         "control_freq": env_cfg.control_freq,
         "mellinger_freq": env_cfg.mellinger_freq,
@@ -770,6 +772,7 @@ def main():
             mass=env_cfg.mass,
             gravity=env_cfg.gravity,
             drone_model=env_cfg.drone_model,
+            mpc_model=policy_cfg.get("mpc_model", "so_rpy"),
             n_batch_max=n_batch_max,
             initial_log_std=policy_cfg["initial_log_std"],
             velocity_max=policy_cfg["mpc_velocity_max"],

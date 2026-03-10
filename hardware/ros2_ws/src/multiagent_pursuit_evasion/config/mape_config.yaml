@@ -1,0 +1,69 @@
+# =============================================================================
+# MAPE Hardware Experiment Configuration
+# =============================================================================
+# This file centralizes all tunable parameters for multi-agent pursuit-evasion
+# hardware experiments. It replaces the various module-level globals previously
+# scattered across pursuer_evader.py, multiagent_pursuit_evasion.py, and server.py.
+
+# ---- Episode selection ----
+# Name of the episode to run (must match an entry in `episodes` below).
+# Override from CLI with: --episode <name>
+active_episode: ep7
+
+# ---- Episode definitions ----
+# Each episode defines initial positions for all agents after takeoff.
+# Positions are [x, y, z] in the motion-capture frame (meters).
+episodes:
+  ep4:
+    blue:
+      - [0.02, -0.57, 1.01]
+      - [0.01,  0.41, 0.90]
+    red:
+      - [3.48, -0.65, 0.81]
+      - [2.58,  0.25, 0.95]
+    red_target: [0, 1]
+
+  ep5:
+    blue:
+      - [0.01, -0.51, 0.95]
+      - [0.04,0.40, 1.07]
+    red:
+      - [3.21,0.0, 0.91]
+      - [3.46,0.11, 1.07]
+    red_target: [0, 1]
+
+  ep7:
+    blue:
+      - [-0.05, -0.40, 1.02]
+      - [0.02, 0.57, 0.91]
+    red:
+      - [3.28, -0.62, 1.09]
+      - [2.71, 0.43, 1.00]
+    red_target: [1, 0]
+
+# ---- Curriculum / collision tolerances ----
+curriculum_level: 9            # Set to null to skip curriculum override
+bb_collision_tolerance: 0.2    # Blue-Blue collision distance (m)
+rr_collision_tolerance: 0.2    # Red-Red collision distance (m)
+rb_collision_tolerance: 0.2    # Red-Blue capture distance (m)
+
+# ---- Takeoff transition thresholds ----
+altitude_threshold: 0.05       # m  - how close to target alt before low-level
+velocity_threshold: 0.05       # m/s - max velocity before low-level switch
+takeoff_duration: 3.0          # seconds for takeoff maneuver
+
+# ---- Attitude limits ----
+roll_pitch_max: 0.2            # rad (~11.5 deg)
+yaw_max: 0.1                  # rad (~5.7 deg)
+
+# ---- Inactive agent settling / braking ----
+settling_velocity_threshold: 0.2  # m/s - velocity below which to lock hover
+braking_vel_multiplier: 3.0       # Velocity damping gain multiplier for unsettled inactive agents
+
+# ---- Hover PID (Z-axis integral) ----
+hover_ki_z: 6.0               # Integral gain for Z-axis hover
+hover_integral_cap: 1.0        # Cap on integral term (m*s)
+
+# ---- Server ----
+status_publisher_frequency: 50 # Hz
+gravity: 9.81                  # m/s^2

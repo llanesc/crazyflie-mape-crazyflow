@@ -16,13 +16,13 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from nav_msgs.msg import Odometry
 from crazyflie_interfaces.msg import LogDataGeneric
 from multiagent_pursuit_evasion_interfaces.msg import Status, EvaderState, PursuerState
-from multiagent_pursuit_evasion_interfaces.srv import Command, ReadyForLowLevel
+from multiagent_pursuit_evasion_interfaces.srv import Command, ReadyForLowLevel, SolverReady
 
 from functools import partial
 
 
-STATUS_PUBLISHER_FREQUENCY = 50  # Hz
-GRAVITY = 9.81
+_DEFAULT_STATUS_PUBLISHER_FREQUENCY = 50  # Hz
+_DEFAULT_GRAVITY = 9.81
 
 
 class MultiAgentPursuitEvasionServer(Node):
@@ -50,6 +50,7 @@ class MultiAgentPursuitEvasionServer(Node):
         self.n_total_agents = n_blue + n_red
         self.config = config
         self.require_accel = require_accel
+        self.gravity = config.get('gravity', _DEFAULT_GRAVITY)
 
         # Extract config parameters
         self.bb_collision_tolerance = config.get('bb_collision_tolerance', 0.2)
@@ -79,10 +80,13 @@ class MultiAgentPursuitEvasionServer(Node):
             state.active = True
 
         # Target assignments: red agent i pursues blue agent targets[i]
-        self.red_targets = list(range(min(n_blue, n_red)))
-        # Extend with modulo assignment if more reds than blues
-        if n_red > n_blue:
-            self.red_targets = [i % n_blue for i in range(n_red)]
+        if 'red_target' in config:
+            self.red_targets = list(config['red_target'])
+        else:
+            self.red_targets = list(range(min(n_blue, n_red)))
+            # Extend with modulo assignment if more reds than blues
+            if n_red > n_blue:
+                self.red_targets = [i % n_blue for i in range(n_red)]
 
         # Pre-compute meshgrids and permutations for fast collision checking
         self.blue_meshgrid = np.arange(n_blue)[None, :].repeat(n_blue, axis=0)
@@ -99,6 +103,9 @@ class MultiAgentPursuitEvasionServer(Node):
 
         # Track if game over has been reported (to avoid spam)
         self.game_over_reported = False
+
+        # Track if the ACMPC solver is built and ready
+        self.solver_ready = False
 
         # QoS: best effort, keep last 1 to drop old messages
         sensor_qos = QoSProfile(
@@ -160,8 +167,14 @@ class MultiAgentPursuitEvasionServer(Node):
             ReadyForLowLevel, 'ready_for_low_level', self._ready_for_low_level_callback
         )
 
+        # SolverReady service - evader calls this when ACMPC solver is built
+        self.solver_ready_srv = self.create_service(
+            SolverReady, 'solver_ready', self._solver_ready_callback
+        )
+
         # Status publishing thread (bypasses ROS2 executor scheduling)
-        self.publish_period = 1.0 / STATUS_PUBLISHER_FREQUENCY
+        status_freq = config.get('status_publisher_frequency', _DEFAULT_STATUS_PUBLISHER_FREQUENCY)
+        self.publish_period = 1.0 / status_freq
         self.running = True
         self.publisher_thread = threading.Thread(target=self._publisher_loop, daemon=True)
         self.publisher_thread.start()
@@ -232,6 +245,14 @@ class MultiAgentPursuitEvasionServer(Node):
 
         return response
 
+    def _solver_ready_callback(self, request: SolverReady.Request,
+                                response: SolverReady.Response):
+        """Handle solver ready notification from evader process."""
+        self.solver_ready = request.ready
+        self.get_logger().info(f'Solver ready: {self.solver_ready}')
+        response.success = True
+        return response
+
     def _all_ready(self) -> bool:
         """Check if all agents have received pose, velocity, and angular_velocity."""
         return np.all(self.blue_ready) and np.all(self.red_ready)
@@ -283,7 +304,7 @@ class MultiAgentPursuitEvasionServer(Node):
         """
         cf_states[index].angular_velocity = [
             msg.values[0] / 1000.0,
-            msg.values[1] / 1000.0,
+            -msg.values[1] / 1000.0,
             msg.values[2] / 1000.0
         ]
         ready[index, ready_index] = True
@@ -298,7 +319,7 @@ class MultiAgentPursuitEvasionServer(Node):
         cf_states[index].acceleration = [
             msg.values[0] / 1000.0,
             msg.values[1] / 1000.0,
-            msg.values[2] / 1000.0 - GRAVITY
+            msg.values[2] / 1000.0 - self.gravity
         ]
         ready[index, ready_index] = True
 
@@ -516,6 +537,7 @@ class MultiAgentPursuitEvasionServer(Node):
         # Build and publish status message
         msg = Status()
         msg.status = self.status
+        msg.solver_ready = self.solver_ready
         msg.evader_cf_names = self.blue_cf_names
         msg.pursuer_cf_names = self.red_cf_names
         msg.pursuer_targets = self.red_targets

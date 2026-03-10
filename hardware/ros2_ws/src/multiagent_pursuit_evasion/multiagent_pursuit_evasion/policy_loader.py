@@ -372,7 +372,8 @@ def _load_acmpc_policy(
     return policy
 
 
-def infer_action(policy, observation: np.ndarray, obs_preprocessor=None) -> np.ndarray:
+def infer_action(policy, observation: np.ndarray, obs_preprocessor=None,
+                 mpc_state: Optional[np.ndarray] = None) -> np.ndarray:
     """Run deterministic inference on a policy.
 
     Args:
@@ -380,6 +381,8 @@ def infer_action(policy, observation: np.ndarray, obs_preprocessor=None) -> np.n
         observation: Raw observation array, shape (batch, obs_dim) or (obs_dim,).
         obs_preprocessor: Optional observation preprocessor (e.g. PartialRunningStandardScaler).
             If provided, normalizes the observation before passing to the policy.
+        mpc_state: Raw MPC state [pos(3), rpy(3), vel(3), drpy(3)], shape (batch, 12) or (12,).
+            Required for ACMPC policies. Must contain un-normalized physical values.
 
     Returns:
         Mean action array, shape (batch, action_dim) or (action_dim,).
@@ -389,20 +392,19 @@ def infer_action(policy, observation: np.ndarray, obs_preprocessor=None) -> np.n
     if observation.ndim == 1:
         observation = observation[None, :]
         squeeze = True
+    if mpc_state is not None and mpc_state.ndim == 1:
+        mpc_state = mpc_state[None, :]
 
     with torch.no_grad():
         obs_tensor = torch.tensor(observation, dtype=torch.float32)
-
-        # Extract raw MPC state before normalization (for ACMPC policies)
-        raw_mpc_state = policy._extract_state(obs_tensor) if hasattr(policy, '_extract_state') else None
 
         # Apply observation preprocessor if available
         if obs_preprocessor is not None:
             obs_tensor = obs_preprocessor(obs_tensor)
 
         inputs = {"observations": obs_tensor}
-        if raw_mpc_state is not None:
-            inputs["mpc_state"] = raw_mpc_state
+        if mpc_state is not None:
+            inputs["mpc_state"] = torch.tensor(mpc_state, dtype=torch.float32)
         mean_actions, _ = policy.compute(inputs)
 
         if isinstance(mean_actions, torch.Tensor):

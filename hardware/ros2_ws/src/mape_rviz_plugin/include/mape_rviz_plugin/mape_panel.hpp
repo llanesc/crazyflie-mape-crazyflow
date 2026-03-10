@@ -88,6 +88,8 @@ private:
   // System status section
   QLabel * system_status_label_;
   QLabel * status_value_label_;
+  QLabel * solver_status_label_;
+  QLabel * solver_value_label_;
 
   // Control buttons
   QPushButton * takeoff_button_;
