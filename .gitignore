@@ -64,3 +64,4 @@ Thumbs.db
 *.db3
 *.mcap
 rosbag2_**
+rosbag_**
