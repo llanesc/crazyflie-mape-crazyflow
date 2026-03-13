@@ -41,10 +41,19 @@ episodes:
       - [2.71, 0.43, 1.00]
     red_target: [1, 0]
 
+  ep10:
+    blue:
+      - [0.00, -0.41, 1.08]
+      - [-0.06, 0.43, 0.90]
+    red:
+      - [3.36, -0.14, 1.06]
+      - [2.59, 0.65, 0.71]
+    red_target: [0, 1]
+
 # ---- Curriculum / collision tolerances ----
 curriculum_level: 9            # Set to null to skip curriculum override
 bb_collision_tolerance: 0.2    # Blue-Blue collision distance (m)
-rr_collision_tolerance: 0.2    # Red-Red collision distance (m)
+rr_collision_tolerance: 0.25    # Red-Red collision distance (m)
 rb_collision_tolerance: 0.2    # Red-Blue capture distance (m)
 
 # ---- Takeoff transition thresholds ----
@@ -54,7 +63,7 @@ takeoff_duration: 3.0          # seconds for takeoff maneuver
 
 # ---- Attitude limits ----
 roll_pitch_max: 0.2            # rad (~11.5 deg)
-yaw_max: 0.1                  # rad (~5.7 deg)
+yaw_max: 0.0                  # rad (~5.7 deg)
 
 # ---- Inactive agent settling / braking ----
 settling_velocity_threshold: 0.2  # m/s - velocity below which to lock hover

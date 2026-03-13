@@ -692,6 +692,12 @@ def main():
             "value_clip": training_cfg["value_clip"],
             "kl_threshold": training_cfg["kl_threshold"],
         },
+        # Preprocessors
+        "preprocessors": {
+            "observation_preprocessor": training_cfg["observation_preprocessor"],
+            "state_preprocessor": training_cfg["state_preprocessor"],
+            "value_preprocessor": training_cfg["value_preprocessor"],
+        },
         "initial_log_std": policy_cfg["initial_log_std"],
         "episode_length_s": env_cfg.episode_length_s,
         "start_time": start_time_str,

@@ -138,8 +138,6 @@ class LeapCMPCLayerLinearLS(nn.Module):
         self.mass = mass if mass is not None else float(self.planner.drone_params["mass"])
         self.gravity = gravity if gravity is not None else float(np.abs(self.planner.drone_params["gravity_vec"][2]))
         self.cmd_f_coef = float(self.planner.drone_params["cmd_f_coef"])
-        # Hover thrust in Newtons (same units as thrust_min/thrust_max from config)
-        self.hover_thrust = self.mass * self.gravity
 
         # Get parameter dimensions
         self.param_dim = self.planner.get_learnable_param_dim()
@@ -205,11 +203,6 @@ class LeapCMPCLayerLinearLS(nn.Module):
             torch.tensor([roll_pitch_max, roll_pitch_max, yaw_max, thrust_max])
         )
 
-        # Store hover thrust and thrust bounds for centered scaling
-        self.register_buffer('hover_thrust_buf', torch.tensor(self.hover_thrust, dtype=torch.float32))
-        self.register_buffer('thrust_min_buf', torch.tensor(thrust_min, dtype=torch.float32))
-        self.register_buffer('thrust_max_buf', torch.tensor(thrust_max, dtype=torch.float32))
-
         # Position references are relative offsets from current position
 
         # Cost parameter network
@@ -251,8 +244,10 @@ class LeapCMPCLayerLinearLS(nn.Module):
             param=mpc_params,
         )
 
-        # Normalize action to [-1, 1]
-        action_normalized = (u0 - self.action_mean) / self.action_scale
+        # Normalize action to [-1, 1] (avoid division by zero for disabled axes)
+        safe_scale = self.action_scale.clone()
+        safe_scale[safe_scale == 0] = 1.0
+        action_normalized = (u0 - self.action_mean) / safe_scale
 
         return action_normalized
 
@@ -323,15 +318,8 @@ class LeapCMPCLayerLinearLS(nn.Module):
         # Combine position (absolute) with other state refs
         yref_state = torch.cat([yref_pos_absolute, yref_other], dim=-1)
 
-        # Linear scaling for roll, pitch, yaw (symmetric around 0)
+        # Linear scaling for control references
         yref_ctrl = self.yref_ctrl_min + yref_ctrl_per_stage * (self.yref_ctrl_max - self.yref_ctrl_min)
-
-        # Thrust scaling centered on hover: raw=0.5 -> hover_thrust
-        # Piecewise linear: [0, 0.5] -> [thrust_min, hover], [0.5, 1] -> [hover, thrust_max]
-        thrust_raw = yref_ctrl_per_stage[..., 3]  # (batch, n_ctrl_stages)
-        thrust_below = self.thrust_min_buf + 2.0 * thrust_raw * (self.hover_thrust_buf - self.thrust_min_buf)
-        thrust_above = self.hover_thrust_buf + 2.0 * (thrust_raw - 0.5) * (self.thrust_max_buf - self.hover_thrust_buf)
-        yref_ctrl[..., 3] = torch.where(thrust_raw <= 0.5, thrust_below, thrust_above)
 
         # Flatten and concatenate
         w_state_flat = W_state.reshape(batch_size, -1)

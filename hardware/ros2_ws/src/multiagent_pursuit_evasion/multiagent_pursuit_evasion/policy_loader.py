@@ -177,11 +177,25 @@ def _load_ffn_policy(
     # Handle different checkpoint formats
     state_dict = _extract_policy_state_dict(checkpoint)
 
-    policy.load_state_dict(state_dict)
+    policy.load_state_dict(state_dict, strict=False)
     policy.eval()
     policy.to(device)
 
     return policy
+
+
+def _override_action_buffers(policy, roll_pitch_max, yaw_max, thrust_min, thrust_max):
+    """Override action_scale/mean buffers that were overwritten by load_state_dict."""
+    thrust_mean = (thrust_min + thrust_max) / 2.0
+    thrust_scale = (thrust_max - thrust_min) / 2.0
+    policy.action_scale = torch.tensor(
+        [roll_pitch_max, roll_pitch_max, yaw_max, thrust_scale],
+        dtype=torch.float32,
+    )
+    policy.action_mean = torch.tensor(
+        [0.0, 0.0, 0.0, thrust_mean],
+        dtype=torch.float32,
+    )
 
 
 def _load_obs_preprocessor(
@@ -365,7 +379,11 @@ def _load_acmpc_policy(
     # Handle different checkpoint formats
     state_dict = _extract_policy_state_dict(checkpoint)
 
-    policy.load_state_dict(state_dict)
+    policy.load_state_dict(state_dict, strict=False)
+
+    # Override buffers so normalization uses config values, not checkpoint values
+    _override_action_buffers(policy, roll_pitch_max, yaw_max, thrust_min, thrust_max)
+
     policy.eval()
     policy.to(device)
 

@@ -15,6 +15,7 @@
 #include <QGroupBox>
 #include <QTimer>
 #include <QFrame>
+#include <QProcess>
 
 #include <rclcpp/rclcpp.hpp>
 #include <rviz_common/panel.hpp>
@@ -65,6 +66,8 @@ protected Q_SLOTS:
   void onTakeoffButtonClicked();
   void onRunButtonClicked();
   void onOffButtonClicked();
+  void onRecordButtonClicked();
+  void onRecordProcessFinished(int exit_code, QProcess::ExitStatus exit_status);
   void updateUI();
 
 private:
@@ -95,6 +98,11 @@ private:
   QPushButton * takeoff_button_;
   QPushButton * run_button_;
   QPushButton * off_button_;
+
+  // Rosbag recording
+  QPushButton * record_button_;
+  QProcess * record_process_;
+  bool is_recording_;
 
   // Drone status sections
   QGroupBox * evaders_group_;

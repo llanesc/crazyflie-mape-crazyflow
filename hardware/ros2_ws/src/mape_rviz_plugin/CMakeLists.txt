@@ -15,6 +15,7 @@ find_package(rviz_common REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(multiagent_pursuit_evasion_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Widgets Core)
 
 # Build the plugin library
@@ -38,6 +39,7 @@ ament_target_dependencies(${PROJECT_NAME}
   pluginlib
   multiagent_pursuit_evasion_interfaces
   std_msgs
+  ament_index_cpp
 )
 
 # Register plugin with RViz

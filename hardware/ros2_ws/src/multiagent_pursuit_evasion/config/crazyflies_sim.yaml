@@ -41,12 +41,13 @@ robot_types:
         body_rates:
           frequency: 50
           vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
-        # pose:
-        #   frequency: 100
-      # angular_velocity:
-      #   velocity:
-      #     frequency: 100
-      #     vars: ["stateEstimateZ.rollRate", "stateEstimateZ.pitchRate", "stateEstimateZ.yawRate"]
+    firmware_params:
+      ring:
+        effect: 7 # 6: double spinner, 7: solid color, 16: packetRate
+        solidBlue: 255 # if set to solid color
+        solidGreen: 0 # if set to solid color
+        solidRed: 0 # if set to solid color
+        headlightEnable: 0
 
   cf_red_sim:
     motion_capture:
@@ -61,6 +62,13 @@ robot_types:
         body_rates:
           frequency: 50
           vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
+    firmware_params:
+      ring:
+        effect: 7 # 6: double spinner, 7: solid color, 16: packetRate
+        solidBlue: 0 # if set to solid color
+        solidGreen: 0 # if set to solid color
+        solidRed: 255 # if set to solid color
+        headlightEnable: 0
         # pose:
         #   frequency: 100
       # angular_velocity:

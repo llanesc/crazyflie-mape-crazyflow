@@ -1210,14 +1210,14 @@ def main():
     loaded = False
 
     if "policy" in checkpoint:
-        shared_policy.load_state_dict(checkpoint["policy"])
+        shared_policy.load_state_dict(checkpoint["policy"], strict=False)
         print("Loaded policy weights from checkpoint['policy']")
         loaded = True
     elif "models" in checkpoint:
         # Multi-agent format with nested structure
         agent_name = env.possible_agents[0]
         if agent_name in checkpoint["models"] and "policy" in checkpoint["models"][agent_name]:
-            shared_policy.load_state_dict(checkpoint["models"][agent_name]["policy"])
+            shared_policy.load_state_dict(checkpoint["models"][agent_name]["policy"], strict=False)
             print("Loaded policy weights from multi-agent checkpoint")
             loaded = True
 
@@ -1227,13 +1227,13 @@ def main():
         if agent_name in checkpoint:
             agent_data = checkpoint[agent_name]
             if isinstance(agent_data, dict) and "policy" in agent_data:
-                shared_policy.load_state_dict(agent_data["policy"])
+                shared_policy.load_state_dict(agent_data["policy"], strict=False)
                 print(f"Loaded policy weights from checkpoint['{agent_name}']['policy']")
                 loaded = True
             elif isinstance(agent_data, dict):
                 # Maybe the agent_data is directly the state dict
                 try:
-                    shared_policy.load_state_dict(agent_data)
+                    shared_policy.load_state_dict(agent_data, strict=False)
                     print(f"Loaded policy weights from checkpoint['{agent_name}']")
                     loaded = True
                 except:
@@ -1242,7 +1242,7 @@ def main():
     if not loaded:
         # Try loading directly (might be just the state dict)
         try:
-            shared_policy.load_state_dict(checkpoint)
+            shared_policy.load_state_dict(checkpoint, strict=False)
             print("Loaded policy weights directly from checkpoint")
             loaded = True
         except Exception as e:

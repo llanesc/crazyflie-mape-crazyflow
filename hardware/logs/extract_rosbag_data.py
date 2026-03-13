@@ -48,6 +48,7 @@ def extract_hw_data(bag_path: Path) -> dict:
         raise ValueError("No RUNNING status")
 
     active_status = {name: [] for name in ALL_NAMES}
+    body_rate_data = {name: [] for name in BLUE_NAMES}
     with Reader(bag_path) as reader:
         topic_map = {}
         for c in reader.connections:
@@ -61,6 +62,8 @@ def extract_hw_data(bag_path: Path) -> dict:
             for i, name in enumerate(BLUE_NAMES):
                 if i < len(msg.cf_evader_states):
                     active_status[name].append((timestamp, msg.cf_evader_states[i].active))
+                    body_rate_data[name].append((timestamp,
+                        np.array(msg.cf_evader_states[i].angular_velocity)))
             for i, name in enumerate(RED_NAMES):
                 if i < len(msg.cf_pursuer_states):
                     active_status[name].append((timestamp, msg.cf_pursuer_states[i].active))
@@ -122,6 +125,14 @@ def extract_hw_data(bag_path: Path) -> dict:
             'cmd_thrust_pwm': np.array([c[4] for c in cmds]),
             'cmd_thrust_N': np.array([pwm_to_thrust(c[4]) for c in cmds]),
         }
+
+        # Add body rates from Status message (evaders only)
+        if name in body_rate_data and body_rate_data[name]:
+            brs = [b for b in body_rate_data[name] if b[0] <= crash_time]
+            if brs:
+                br_t = np.array([(b[0] - t0) / 1e9 for b in brs])
+                result[name]['body_rate_t'] = br_t
+                result[name]['body_rates'] = np.array([b[1] for b in brs])
 
     return result
 

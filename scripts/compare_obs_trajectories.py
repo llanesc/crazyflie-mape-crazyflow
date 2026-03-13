@@ -320,6 +320,19 @@ def plot_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
         ax.scatter(sim_pos[0, 0], sim_pos[0, 1], sim_pos[0, 2],
                    color=color, marker='x', s=40)
 
+    # Equal aspect ratio
+    all_pts = np.concatenate([hw_agents[n]['pos'] for n in agent_names] +
+                             [sim_agents[n]['pos'] for n in agent_names], axis=0)
+    margin = 0.15
+    mins = all_pts.min(axis=0) - margin
+    maxs = all_pts.max(axis=0) + margin
+    centers = (mins + maxs) / 2
+    max_range = (maxs - mins).max() / 2
+    ax.set_xlim(centers[0] - max_range, centers[0] + max_range)
+    ax.set_ylim(centers[1] - max_range, centers[1] + max_range)
+    ax.set_zlim(centers[2] - max_range, centers[2] + max_range)
+    ax.set_box_aspect([1, 1, 1])
+
     ax.set_xlabel('X [m]')
     ax.set_ylabel('Y [m]')
     ax.set_zlabel('Z [m]')
@@ -390,20 +403,28 @@ def animate_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
             all_pos_arrays.append(hw_interp_r[n]["pos"])
             all_pos_arrays.append(sim_interp_r[n]["pos"])
 
-    total_frames = sum(len(r[0]) for r in runs)
-
-    # Compute axis limits from all runs
+    # Compute axis limits from all runs — equal aspect ratio
     all_pos = np.concatenate(all_pos_arrays, axis=0)
     margin = 0.15
-    xlim = (all_pos[:, 0].min() - margin, all_pos[:, 0].max() + margin)
-    ylim = (all_pos[:, 1].min() - margin, all_pos[:, 1].max() + margin)
-    zlim = (all_pos[:, 2].min() - margin, all_pos[:, 2].max() + margin)
+    mins = all_pos.min(axis=0) - margin
+    maxs = all_pos.max(axis=0) + margin
+    centers = (mins + maxs) / 2
+    max_range = (maxs - mins).max() / 2
+    xlim = (centers[0] - max_range, centers[0] + max_range)
+    ylim = (centers[1] - max_range, centers[1] + max_range)
+    zlim = (centers[2] - max_range, centers[2] + max_range)
 
     # Build frame index → (run_idx, local_frame_idx) mapping
+    # Add pause frames (0.5s worth) at the end of each run
+    pause_frames = int(1.5 * fps / slowdown)
     frame_map = []
     for run_idx, (t_frames_r, _, _) in enumerate(runs):
         for local_idx in range(len(t_frames_r)):
             frame_map.append((run_idx, local_idx))
+        last_idx = len(t_frames_r) - 1
+        for _ in range(pause_frames):
+            frame_map.append((run_idx, last_idx))
+    total_frames = len(frame_map)
 
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection='3d')
@@ -424,6 +445,7 @@ def animate_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
     def update(global_frame):
         ax.cla()
         ax.set_xlim(xlim); ax.set_ylim(ylim); ax.set_zlim(zlim)
+        ax.set_box_aspect([1, 1, 1])
         ax.set_xlabel('X [m]'); ax.set_ylabel('Y [m]'); ax.set_zlabel('Z [m]')
 
         run_idx, local_idx = frame_map[global_frame]
@@ -466,9 +488,14 @@ def animate_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
 
     playback_fps = fps / slowdown
     anim = FuncAnimation(fig, update, frames=total_frames, interval=1000/playback_fps)
-    anim.save(str(save_path), writer='pillow', fps=playback_fps, dpi=100)
+    ext = Path(save_path).suffix.lower()
+    if ext == ".mp4":
+        anim.save(str(save_path), writer='ffmpeg', fps=playback_fps, dpi=100,
+                  codec='libx264', extra_args=['-pix_fmt', 'yuv420p'])
+    else:
+        anim.save(str(save_path), writer='pillow', fps=playback_fps, dpi=100)
     plt.close(fig)
-    print(f"Saved animated trajectory GIF: {save_path} "
+    print(f"Saved animated trajectory: {save_path} "
           f"({total_frames} frames, {playback_fps:.1f} fps playback = 1:{slowdown} speed, "
           f"{n_runs} run(s))")
 
@@ -601,7 +628,7 @@ def main():
     hw_runs_data = [(t_hw, hw_agents)] * 10
 
     animate_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents,
-                            agent_names, outdir / "trajectories_3d.gif",
+                            agent_names, outdir / "trajectories_3d.mp4",
                             hw_label=args.hw_label, sim_label=args.sim_label,
                             hw_runs=hw_runs_data)
 

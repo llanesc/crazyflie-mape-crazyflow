@@ -2,8 +2,11 @@
 
 #include <QApplication>
 #include <QStyle>
+#include <QDir>
+#include <QDateTime>
 #include <pluginlib/class_list_macros.hpp>
 #include <rviz_common/display_context.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 namespace mape_rviz_plugin
 {
@@ -138,6 +141,8 @@ void DroneStatusWidget::setState(const multiagent_pursuit_evasion_interfaces::ms
 MapePanel::MapePanel(QWidget * parent)
 : rviz_common::Panel(parent),
   node_(nullptr),
+  record_process_(nullptr),
+  is_recording_(false),
   update_timer_(nullptr)
 {
   setupUI();
@@ -147,6 +152,14 @@ MapePanel::~MapePanel()
 {
   if (update_timer_) {
     update_timer_->stop();
+  }
+  // Stop any active rosbag recording
+  if (record_process_ && record_process_->state() != QProcess::NotRunning) {
+    record_process_->terminate();
+    record_process_->waitForFinished(3000);
+    if (record_process_->state() != QProcess::NotRunning) {
+      record_process_->kill();
+    }
   }
 }
 
@@ -207,6 +220,25 @@ void MapePanel::setupUI()
   connect(off_button_, &QPushButton::clicked, this, &MapePanel::onOffButtonClicked);
 
   main_layout_->addWidget(control_group);
+
+  // =========================================================================
+  // Rosbag Recording Section
+  // =========================================================================
+  auto * record_group = new QGroupBox("Recording", this);
+  auto * record_layout = new QHBoxLayout(record_group);
+
+  record_button_ = new QPushButton("Record Rosbag", this);
+  record_button_->setMinimumHeight(40);
+  record_button_->setCheckable(true);
+  record_button_->setStyleSheet(
+    "QPushButton { background-color: #607D8B; color: white; }"
+    "QPushButton:checked { background-color: #E91E63; color: white; }");
+
+  record_layout->addWidget(record_button_);
+
+  connect(record_button_, &QPushButton::clicked, this, &MapePanel::onRecordButtonClicked);
+
+  main_layout_->addWidget(record_group);
 
   // =========================================================================
   // Evaders Section
@@ -438,6 +470,77 @@ void MapePanel::onRunButtonClicked()
 void MapePanel::onOffButtonClicked()
 {
   callCommandService(multiagent_pursuit_evasion_interfaces::srv::Command::Request::MAPE_CMD_OFF);
+}
+
+void MapePanel::onRecordButtonClicked()
+{
+  // Disable button briefly to prevent rapid toggling
+  record_button_->setEnabled(false);
+  QTimer::singleShot(500, this, [this]() { record_button_->setEnabled(true); });
+
+  if (!is_recording_) {
+    // Start recording
+    record_process_ = new QProcess(this);
+    connect(record_process_,
+      QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+      this, &MapePanel::onRecordProcessFinished);
+
+    // Save rosbag to hardware/logs/ directory
+    // Share path: .../hardware/ros2_ws/install/mape_rviz_plugin/share/mape_rviz_plugin
+    // Go up 4 levels to ros2_ws/, then up 1 to hardware/, then into logs/
+    std::string pkg_share = ament_index_cpp::get_package_share_directory("mape_rviz_plugin");
+    QDir logs_dir(QString::fromStdString(pkg_share) + "/../../../.." + "/../logs");
+    logs_dir.makeAbsolute();
+    if (!logs_dir.exists()) {
+      logs_dir.mkpath(".");
+    }
+    QString bag_name = "rosbag_" + QDateTime::currentDateTime().toString("yyyy_MM_dd-HH_mm_ss");
+    QString bag_path = logs_dir.filePath(bag_name);
+
+    record_process_->start("ros2", QStringList() << "bag" << "record" << "-a" << "-o" << bag_path);
+
+    if (record_process_->waitForStarted(3000)) {
+      is_recording_ = true;
+      record_button_->setChecked(true);
+      record_button_->setText("Stop Recording");
+      if (node_) {
+        RCLCPP_INFO(node_->get_logger(), "Rosbag recording started");
+      }
+    } else {
+      // Failed to start
+      record_button_->setChecked(false);
+      if (node_) {
+        RCLCPP_ERROR(node_->get_logger(), "Failed to start rosbag recording");
+      }
+      delete record_process_;
+      record_process_ = nullptr;
+    }
+  } else {
+    // Stop recording - send SIGINT for clean shutdown
+    if (record_process_ && record_process_->state() != QProcess::NotRunning) {
+      record_process_->terminate();
+      // Don't update state here - let onRecordProcessFinished handle it
+    }
+  }
+}
+
+void MapePanel::onRecordProcessFinished(int exit_code, QProcess::ExitStatus exit_status)
+{
+  (void)exit_code;
+  (void)exit_status;
+
+  is_recording_ = false;
+  record_button_->setChecked(false);
+  record_button_->setText("Record Rosbag");
+
+  if (node_) {
+    RCLCPP_INFO(node_->get_logger(), "Rosbag recording stopped");
+  }
+
+  if (record_process_) {
+    record_process_->deleteLater();
+    record_process_ = nullptr;
+  }
 }
 
 void MapePanel::callCommandService(uint8_t command)

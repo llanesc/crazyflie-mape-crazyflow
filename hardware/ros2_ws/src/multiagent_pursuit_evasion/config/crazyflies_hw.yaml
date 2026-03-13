@@ -184,7 +184,7 @@ all:
       enHighLevel: 1
     stabilizer:
       estimator: 2 # 1: complementary, 2: kalman
-      controller: 1 # 1: PID, 2: mellinger
+      controller: 2 # 1: PID, 2: mellinger
     flightmode:
       stabModeRoll: 1
       stabModePitch: 1

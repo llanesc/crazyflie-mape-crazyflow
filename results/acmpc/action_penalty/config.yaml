@@ -55,9 +55,9 @@ environment:
   random_target_assignment: true  # true for random, false for deterministic (red_i -> blue_i)
 
   # Physical parameters (optional overrides)
-  mass: 0.0418  # Override drone mass [kg], if not set uses drone_model default
-  thrust_min: 0.205029  # 0.5 * 0.0418 * 9.81 [N]
-  thrust_max: 0.615087  # 1.5 * 0.0418 * 9.81 [N]
+  mass: 0.0416  # Override drone mass [kg], if not set uses drone_model default
+  thrust_min: 0.204048  # 0.5 * 0.0416 * 9.81 [N]
+  thrust_max: 0.612144  # 1.5 * 0.0416 * 9.81 [N]
 
   # Domain randomization
   randomize_mass: false  # Randomize mass with normal distribution
@@ -84,7 +84,7 @@ policy:
 
   # Control limits
   roll_pitch_max: 0.2
-  yaw_max: 0.1
+  yaw_max: 0.01
 
   # Network architecture
   cost_net_sizes: [256, 256]

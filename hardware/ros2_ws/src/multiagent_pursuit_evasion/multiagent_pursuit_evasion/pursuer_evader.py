@@ -42,7 +42,7 @@ _DEFAULT_ALTITUDE_THRESHOLD = 0.05
 _DEFAULT_VELOCITY_THRESHOLD = 0.05
 _DEFAULT_TAKEOFF_DURATION = 3.0
 _DEFAULT_ROLL_PITCH_MAX = 0.2
-_DEFAULT_YAW_MAX = 0.1
+_DEFAULT_YAW_MAX = 0.0
 _DEFAULT_SETTLING_VELOCITY_THRESHOLD = 0.2
 _DEFAULT_HOVER_KI_Z = 6.0
 _DEFAULT_HOVER_INTEGRAL_CAP = 1.0
@@ -156,8 +156,11 @@ class TeamBase(Node):
         self.team_initialized = False
         self.initialized_control = False
 
-        # Takeoff and low-level control state from config
+        # Takeoff, landing, and low-level control state from config
         self.takeoff_commanded = False
+        self.landing_commanded = False
+        self.landing_target_pos = None  # Fixed XY, ramping Z target for smooth descent
+        self.landing_descent_rate = config.get('landing_descent_rate', 0.3)  # m/s
         self.low_level_enabled = False
         self.altitude_threshold = config.get('altitude_threshold', _DEFAULT_ALTITUDE_THRESHOLD)
         self.velocity_threshold = config.get('velocity_threshold', _DEFAULT_VELOCITY_THRESHOLD)
@@ -224,6 +227,26 @@ class TeamBase(Node):
                 self.get_logger().warn(f'Takeoff service not available for {cf}')
 
         self.takeoff_commanded = True
+        self.landing_commanded = False
+
+    def start_landing(self, current_positions: np.ndarray):
+        """Begin low-level controlled landing descent.
+
+        Captures current XY positions and starts ramping Z target down
+        at landing_descent_rate for a smooth descent.
+
+        Args:
+            current_positions: Current positions, shape (n_agents, 3).
+        """
+        if self.landing_commanded:
+            return
+
+        self.landing_commanded = True
+        self.landing_target_pos = current_positions.copy()
+        self.get_logger().info(
+            f'Starting landing descent at {self.landing_descent_rate:.1f} m/s '
+            f'from heights {current_positions[:, 2]}'
+        )
 
     def check_ready_for_low_level(self, states: np.ndarray, target_heights: list) -> bool:
         """Check if all drones have reached altitude and are stable.
@@ -295,40 +318,74 @@ class TeamBase(Node):
             self.get_logger().warn('ready_for_low_level service not available')
 
     def cmd_attitude_setpoint(self, control: np.ndarray, index: int,
-                              current_yaw: float = 0.0):
+                              current_rpy: np.ndarray = None):
         """Publish attitude setpoint command.
 
         Args:
             control: [roll_rad, pitch_rad, yaw_rad, thrust_N] in physical units.
             index: Agent index in team.
-            current_yaw: Current yaw angle in radians for yaw tracking.
+            current_rpy: Current [roll, pitch, yaw] in radians. If None, assumes zeros.
         """
+        if current_rpy is None:
+            current_rpy = np.zeros(3)
+        current_roll, current_pitch, current_yaw = current_rpy
+
         roll_rad, pitch_rad, yaw_des, thrust_N = control.ravel()
 
-        # PID controller: convert desired yaw angle to yaw rate
+        # PID controller: output body-frame yaw rate (r) directly.
+        # Mellinger firmware compares attitudeRate.yaw against gyro.z (body rate),
+        # so we output body-z rate directly — no Euler-to-body conversion needed.
+        # (controller_mellinger.c L258: ew.z = attitudeRate.yaw - gyro.z)
         yaw_error = yaw_des - current_yaw
         # Wrap to [-pi, pi]
         yaw_error = (yaw_error + np.pi) % (2 * np.pi) - np.pi
-        kP_yaw = 2.5
-        kD_yaw = 0.5
+        kP_yaw = 8.0
         kI_yaw = 0.3
+        kD_yaw = 0.3
+        max_yaw_rate = 3.0  # rad/s output clamp (~172 deg/s)
         dt = 0.02  # ~50Hz control loop
-        if not hasattr(self, '_prev_yaw_error'):
-            self._prev_yaw_error = {}
         if not hasattr(self, '_yaw_error_integral'):
             self._yaw_error_integral = {}
-        prev_error = self._prev_yaw_error.get(index, yaw_error)
+        if not hasattr(self, '_yaw_error_prev'):
+            self._yaw_error_prev = {}
+        if not hasattr(self, '_yaw_d_filtered'):
+            self._yaw_d_filtered = {}
         integral = self._yaw_error_integral.get(index, 0.0)
-        integral = np.clip(integral + yaw_error * dt, -0.5, 0.5)
-        d_error = (yaw_error - prev_error) / dt
-        self._prev_yaw_error[index] = yaw_error
+        prev_error = self._yaw_error_prev.get(index, 0.0)
+        d_error_raw = (yaw_error - prev_error) / dt
+        self._yaw_error_prev[index] = yaw_error
+        # Low-pass filter on derivative: alpha=0.2 (cutoff ~1.6Hz at 50Hz)
+        alpha_d = 0.2
+        d_filtered = self._yaw_d_filtered.get(index, 0.0)
+        d_error = alpha_d * d_error_raw + (1.0 - alpha_d) * d_filtered
+        self._yaw_d_filtered[index] = d_error
+        # Compute PID output
+        yaw_rate_unclamped = -(kP_yaw * yaw_error + kI_yaw * integral - kD_yaw * d_error)
+        yaw_rate_body = np.clip(yaw_rate_unclamped, -max_yaw_rate, max_yaw_rate)
+        # Anti-windup: only integrate when output is not saturated
+        if abs(yaw_rate_unclamped) < max_yaw_rate:
+            integral = np.clip(integral + yaw_error * dt, -0.5, 0.5)
         self._yaw_error_integral[index] = integral
-        yaw_rate = -kP_yaw * yaw_error - kD_yaw * d_error - kI_yaw * integral
+
+        # Feedforward: compensate roll/pitch coupling from Euler kinematics.
+        # When commanding a body-z yaw rate ψ̇_body, the Euler-to-body transform
+        # couples into roll (p = -ψ̇ sin(θ)) and pitch (q = ψ̇ sin(φ) cos(θ)).
+        # Add small angle corrections to cancel these coupling terms.
+        cp = cos(current_pitch)
+        sp = sin(current_pitch)
+        cr = cos(current_roll)
+        sr = sin(current_roll)
+
+        # Estimate Euler yaw rate from body rate: ψ̇ = r / (cos(φ) cos(θ))
+        denom = cr * cp
+        yaw_rate_euler = yaw_rate_body / denom if abs(denom) > 0.1 else yaw_rate_body
+        roll_ff = -yaw_rate_euler * sp * dt
+        pitch_ff = yaw_rate_euler * sr * cp * dt
 
         setpoint = AttitudeSetpoint()
-        setpoint.roll = roll_rad
-        setpoint.pitch = pitch_rad
-        setpoint.yaw_rate = yaw_rate
+        setpoint.roll = roll_rad + roll_ff
+        setpoint.pitch = pitch_rad + pitch_ff
+        setpoint.yaw_rate = yaw_rate_body
         setpoint.thrust = self.thrust_to_pwm(thrust_N)
 
         self.attitude_setpoint_publishers[index].publish(setpoint)
@@ -511,15 +568,18 @@ class PursuerTeam(TeamBase):
         status = msg.status
 
         if status == Status.MAPE_STATUS_OFF:
-            return
+            if self.low_level_enabled and not self.landing_commanded:
+                red_states_np = self.states_to_np(red_states)
+                self.start_landing(red_states_np[:, 0:3])
+            if not self.low_level_enabled or not self.landing_commanded:
+                return
+            # Fall through to send landing control commands
 
-        # Command takeoff when in TAKEOFF status
-        if status == Status.MAPE_STATUS_TAKEOFF and not self.takeoff_commanded:
+        elif status == Status.MAPE_STATUS_TAKEOFF and not self.takeoff_commanded:
             self.command_takeoff(self.red_initial_height)
             return
 
-        # Check if ready to switch to low-level control during TAKEOFF
-        if status == Status.MAPE_STATUS_TAKEOFF and not self.low_level_enabled:
+        elif status == Status.MAPE_STATUS_TAKEOFF and not self.low_level_enabled:
             red_states_np = self.states_to_np(red_states)
             if self.check_ready_for_low_level(red_states_np, self.red_initial_height):
                 self.switch_to_low_level()
@@ -538,8 +598,7 @@ class PursuerTeam(TeamBase):
 
         red_states_np = self.states_to_np(red_states)
         for n in range(self.team_size):
-            current_yaw = red_states_np[n, 8]
-            self.cmd_attitude_setpoint(controls[n, :], n, current_yaw=current_yaw)
+            self.cmd_attitude_setpoint(controls[n, :], n, current_rpy=red_states_np[n, 6:9])
 
     def compute_control(self, red_states: list, blue_states: list, status: int) -> np.ndarray:
         """Compute control for all pursuers.
@@ -556,6 +615,14 @@ class PursuerTeam(TeamBase):
         blue_states_np = self.states_to_np(blue_states)
 
         if status == Status.MAPE_STATUS_OFF:
+            if self.landing_commanded and self.landing_target_pos is not None:
+                # Ramp target Z down at descent rate (dt ~0.02s at 50Hz)
+                self.landing_target_pos[:, 2] -= self.landing_descent_rate * 0.02
+                self.landing_target_pos[:, 2] = np.maximum(self.landing_target_pos[:, 2], 0.0)
+                return self._pid_control(
+                    red_states_np, self.landing_target_pos,
+                    np.zeros_like(self.landing_target_pos)
+                )
             return np.zeros((red_states_np.shape[0], 4))
 
         elif status == Status.MAPE_STATUS_TAKEOFF or status == Status.MAPE_STATUS_INITIALIZED:
@@ -669,19 +736,34 @@ class PursuerTeam(TeamBase):
             return controls
 
         elif status == Status.MAPE_STATUS_BLUE_WON or status == Status.MAPE_STATUS_RED_WON:
-            # Game over - hover at current/settled position
+            # Game over - brake then hover at settled position
             hover_pos = np.zeros_like(red_states_np[:, 0:3])
+            needs_braking = np.zeros(self.team_size, dtype=bool)
             for i in range(self.team_size):
                 if self.agent_settled[i]:
                     hover_pos[i] = self.settled_pos[i]
                 else:
-                    hover_pos[i] = red_states_np[i, 0:3]
-                    # Mark as settled if not already
+                    # Brake toward last known position, not current (drifting) position
+                    hover_pos[i] = self.initial_pos[i]
                     vel_mag = np.linalg.norm(red_states_np[i, 3:6])
                     if vel_mag < self.settling_velocity_threshold:
                         self.agent_settled[i] = True
                         self.settled_pos[i] = red_states_np[i, 0:3]
-            return self._pid_control(red_states_np, hover_pos, np.zeros_like(hover_pos))
+                    else:
+                        needs_braking[i] = True
+
+            controls = self._pid_control(red_states_np, hover_pos, np.zeros_like(hover_pos))
+            # Use aggressive braking for unsettled agents
+            if np.any(needs_braking):
+                braking_idx = np.where(needs_braking)[0]
+                controls[braking_idx] = self._pid_control(
+                    red_states_np[braking_idx],
+                    hover_pos[braking_idx],
+                    np.zeros_like(hover_pos[braking_idx]),
+                    agent_indices=braking_idx,
+                    braking=True
+                )
+            return controls
 
         return np.zeros((len(red_states), 4))
 
@@ -1100,15 +1182,18 @@ class EvaderTeam(TeamBase):
         status = msg.status
 
         if status == Status.MAPE_STATUS_OFF:
-            return
+            if self.low_level_enabled and not self.landing_commanded:
+                blue_states_np = self.states_to_np(blue_states)
+                self.start_landing(blue_states_np[:, 0:3])
+            if not self.low_level_enabled or not self.landing_commanded:
+                return
+            # Fall through to send landing control commands
 
-        # Command takeoff when in TAKEOFF status
-        if status == Status.MAPE_STATUS_TAKEOFF and not self.takeoff_commanded:
+        elif status == Status.MAPE_STATUS_TAKEOFF and not self.takeoff_commanded:
             self.command_takeoff(self.blue_initial_height)
             return
 
-        # Check if ready to switch to low-level control during TAKEOFF
-        if status == Status.MAPE_STATUS_TAKEOFF and not self.low_level_enabled:
+        elif status == Status.MAPE_STATUS_TAKEOFF and not self.low_level_enabled:
             blue_states_np = self.states_to_np(blue_states)
             if self.check_ready_for_low_level(blue_states_np, self.blue_initial_height):
                 self.switch_to_low_level()
@@ -1127,8 +1212,7 @@ class EvaderTeam(TeamBase):
 
         blue_states_np = self.states_to_np(blue_states)
         for n in range(self.team_size):
-            current_yaw = blue_states_np[n, 8]
-            self.cmd_attitude_setpoint(controls[n, :], n, current_yaw=current_yaw)
+            self.cmd_attitude_setpoint(controls[n, :], n, current_rpy=blue_states_np[n, 6:9])
 
     def compute_control(self, blue_states: list, red_states: list, status: int) -> np.ndarray:
         """Compute control for all evaders.
@@ -1145,6 +1229,15 @@ class EvaderTeam(TeamBase):
         red_states_np = self.states_to_np(red_states)
 
         if status == Status.MAPE_STATUS_OFF:
+            if self.landing_commanded and self.landing_target_pos is not None:
+                # Ramp target Z down at descent rate (dt ~0.02s at 50Hz)
+                self.landing_target_pos[:, 2] -= self.landing_descent_rate * 0.02
+                self.landing_target_pos[:, 2] = np.maximum(self.landing_target_pos[:, 2], 0.0)
+                blue_10d = self._extract_pid_states(blue_states_np)
+                return self._pid_control(
+                    blue_10d, self.landing_target_pos,
+                    np.zeros_like(self.landing_target_pos)
+                )
             return np.zeros((len(blue_states), 4))
 
         elif status == Status.MAPE_STATUS_TAKEOFF or status == Status.MAPE_STATUS_INITIALIZED:
@@ -1232,20 +1325,36 @@ class EvaderTeam(TeamBase):
             return controls
 
         elif status == Status.MAPE_STATUS_BLUE_WON or status == Status.MAPE_STATUS_RED_WON:
-            # Game over - hover at current/settled position
+            # Game over - brake then hover at settled position
             hover_pos = np.zeros_like(blue_states_np[:, 0:3])
+            needs_braking = np.zeros(self.team_size, dtype=bool)
             for i in range(self.team_size):
                 if self.agent_settled[i]:
                     hover_pos[i] = self.settled_pos[i]
                 else:
-                    hover_pos[i] = blue_states_np[i, 0:3]
-                    # Mark as settled if not already
+                    # Brake toward last known position, not current (drifting) position
+                    hover_pos[i] = self.initial_pos[i]
                     vel_mag = np.linalg.norm(blue_states_np[i, 3:6])
                     if vel_mag < self.settling_velocity_threshold:
                         self.agent_settled[i] = True
                         self.settled_pos[i] = blue_states_np[i, 0:3]
+                    else:
+                        needs_braking[i] = True
+
             blue_10d = self._extract_pid_states(blue_states_np)
-            return self._pid_control(blue_10d, hover_pos, np.zeros_like(hover_pos))
+            controls = self._pid_control(blue_10d, hover_pos, np.zeros_like(hover_pos))
+            # Use aggressive braking for unsettled agents
+            if np.any(needs_braking):
+                braking_idx = np.where(needs_braking)[0]
+                blue_10d_braking = self._extract_pid_states(blue_states_np[braking_idx])
+                controls[braking_idx] = self._pid_control(
+                    blue_10d_braking,
+                    hover_pos[braking_idx],
+                    np.zeros_like(hover_pos[braking_idx]),
+                    agent_indices=braking_idx,
+                    braking=True
+                )
+            return controls
 
         return np.zeros((len(blue_states), 4))
 
@@ -1429,7 +1538,8 @@ class EvaderTeam(TeamBase):
         return physical_actions
 
     def _pid_control(self, states: np.ndarray, target_pos: np.ndarray,
-                     target_vel: np.ndarray, agent_indices: np.ndarray = None) -> np.ndarray:
+                     target_vel: np.ndarray, agent_indices: np.ndarray = None,
+                     braking: bool = False) -> np.ndarray:
         """PID position control for hover.
 
         Uses PD control for XY axes and PID control for Z axis to eliminate
@@ -1442,6 +1552,8 @@ class EvaderTeam(TeamBase):
             agent_indices: Optional indices of agents being controlled. If None,
                 assumes all agents [0, 1, ..., n-1]. Required when controlling
                 a subset of agents to correctly update per-agent integral state.
+            braking: If True, amplify velocity damping gains by
+                braking_vel_multiplier for more aggressive deceleration.
 
         Returns:
             Control array [roll, pitch, yaw, thrust], shape (n, 4).
@@ -1485,6 +1597,12 @@ class EvaderTeam(TeamBase):
         accel_z = accel_z + self.hover_ki_z * self.z_error_integral[agent_indices, None]
 
         accel = np.concatenate([accel_xy, accel_z], axis=-1)
+
+        # Amplify velocity damping for aggressive braking
+        if braking:
+            extra_vel_accel = (self.braking_vel_multiplier - 1.0) * vel_rb
+            accel[:, :2] += k_vxy * extra_vel_accel[:, :2]
+            accel[:, 2:3] += k_vz * extra_vel_accel[:, 2:3]
 
         # Acceleration to attitude
         target_thrust = accel * self.mass
