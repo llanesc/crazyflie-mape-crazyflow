@@ -60,7 +60,6 @@ from crazyflie_mape_crazyflow.agents import MAPPO_MPC
 from crazyflie_mape_crazyflow.envs import RedVsBlueEnv, RedVsBlueEnvConfig, RescaleActionWrapper
 from crazyflie_mape_crazyflow.envs.spawn import create_spawn_fn_from_config
 from crazyflie_mape_crazyflow.policies import (
-    LeapCSharedGaussianPolicyQP,
     LeapCSharedGaussianPolicyLinearLS,
     SharedCritic,
 )
@@ -555,10 +554,9 @@ def main():
     raw_env = env
 
     # Save environment config (parameters that define the environment/policy structure)
-    cost_type = policy_cfg.get("cost_type", "qp")  # Already loaded above
     environment_config = {
         "policy_type": "acmpc",
-        "cost_type": cost_type,  # "qp" or "linear_ls"
+        "cost_type": "linear_ls",
         "experiment_name": args.experiment,
         "n_pairs": env_cfg.n_pairs,
         "drone_model": env_cfg.drone_model,
@@ -576,8 +574,8 @@ def main():
         # Network activations
         "cost_net_activation": policy_cfg["cost_net_activation"],
         "value_activation": policy_cfg["value_activation"],
-        # LINEAR_LS specific (only used when cost_type == "linear_ls")
         "pos_offset_max": policy_cfg["pos_offset_max"],
+        "binary_embed_dim": policy_cfg.get("binary_embed_dim", 0),
         # MPC dynamics model
         "mpc_model": policy_cfg.get("mpc_model", "so_rpy"),
         # Frequencies
@@ -759,54 +757,31 @@ def main():
     print(f"Creating shared policy with obs_dim={sample_obs_space.shape[0]}, action_dim={sample_action_space.shape[0]}")
     print(f"MPC batch max: {n_batch_max} (rollout={rollout_batch}, update={update_batch})")
 
-    # Select policy class based on cost_type
-    cost_type = policy_cfg.get("cost_type", "qp")  # Default to "qp" for backwards compatibility
-    print(f"Using cost_type: {cost_type}")
+    binary_embed_dim = policy_cfg.get("binary_embed_dim", 0)
 
-    if cost_type == "linear_ls":
-        shared_policy = LeapCSharedGaussianPolicyLinearLS(
-            observation_space=sample_obs_space,
-            action_space=sample_action_space,
-            device=device,
-            mpc_horizon=policy_cfg["mpc_horizon"],
-            mpc_dt=policy_cfg["mpc_dt"],
-            hidden_dim=policy_cfg["cost_net_sizes"][0],
-            roll_pitch_max=policy_cfg["roll_pitch_max"],
-            yaw_max=policy_cfg["yaw_max"],
-            thrust_min=env_cfg.thrust_min,
-            thrust_max=env_cfg.thrust_max,
-            mass=env_cfg.mass,
-            gravity=env_cfg.gravity,
-            drone_model=env_cfg.drone_model,
-            mpc_model=policy_cfg.get("mpc_model", "so_rpy"),
-            n_batch_max=n_batch_max,
-            initial_log_std=policy_cfg["initial_log_std"],
-            velocity_max=policy_cfg["mpc_velocity_max"],
-            activation=policy_cfg["cost_net_activation"],
-            pos_offset_max=policy_cfg["pos_offset_max"],
-        )
-    elif cost_type == "qp":
-        shared_policy = LeapCSharedGaussianPolicyQP(
-            observation_space=sample_obs_space,
-            action_space=sample_action_space,
-            device=device,
-            mpc_horizon=policy_cfg["mpc_horizon"],
-            mpc_dt=policy_cfg["mpc_dt"],
-            hidden_dim=policy_cfg["cost_net_sizes"][0],
-            roll_pitch_max=policy_cfg["roll_pitch_max"],
-            yaw_max=policy_cfg["yaw_max"],
-            thrust_min=env_cfg.thrust_min,
-            thrust_max=env_cfg.thrust_max,
-            mass=env_cfg.mass,
-            gravity=env_cfg.gravity,
-            drone_model=env_cfg.drone_model,
-            n_batch_max=n_batch_max,
-            initial_log_std=policy_cfg["initial_log_std"],
-            velocity_max=policy_cfg["mpc_velocity_max"],
-            activation=policy_cfg["cost_net_activation"],
-        )
-    else:
-        raise ValueError(f"Unknown cost_type: {cost_type}. Must be 'qp' or 'linear_ls'")
+    shared_policy = LeapCSharedGaussianPolicyLinearLS(
+        observation_space=sample_obs_space,
+        action_space=sample_action_space,
+        device=device,
+        mpc_horizon=policy_cfg["mpc_horizon"],
+        mpc_dt=policy_cfg["mpc_dt"],
+        hidden_dim=policy_cfg["cost_net_sizes"][0],
+        roll_pitch_max=policy_cfg["roll_pitch_max"],
+        yaw_max=policy_cfg["yaw_max"],
+        thrust_min=env_cfg.thrust_min,
+        thrust_max=env_cfg.thrust_max,
+        mass=env_cfg.mass,
+        gravity=env_cfg.gravity,
+        drone_model=env_cfg.drone_model,
+        mpc_model=policy_cfg.get("mpc_model", "so_rpy"),
+        n_batch_max=n_batch_max,
+        initial_log_std=policy_cfg["initial_log_std"],
+        velocity_max=policy_cfg["mpc_velocity_max"],
+        activation=policy_cfg["cost_net_activation"],
+        pos_offset_max=policy_cfg["pos_offset_max"],
+        binary_dims=raw_env.obs_binary_dims if binary_embed_dim > 0 else None,
+        binary_embed_dim=binary_embed_dim,
+    )
 
     shared_critic = SharedCritic(
         observation_space=raw_env.shared_observation_space,
@@ -814,6 +789,8 @@ def main():
         device=device,
         hidden_dim=policy_cfg["value_net_sizes"][0],
         activation=policy_cfg["value_activation"],
+        binary_dims=raw_env.state_binary_dims if binary_embed_dim > 0 else None,
+        binary_embed_dim=binary_embed_dim,
     )
 
     # Create models dictionary for all agents (parameter sharing)

@@ -1503,7 +1503,10 @@ class EvaderTeam(TeamBase):
                 yaw = np.arctan2(R[1, 0], R[0, 0])
                 mpc_state[i, 3:6] = [roll, pitch, yaw]            # rpy
                 mpc_state[i, 6:9] = blue_states[agent_idx, 3:6]   # vel
-                mpc_state[i, 9:12] = blue_states[agent_idx, 15:18] # body_rates (drpy)
+                body_rates = blue_states[agent_idx, 15:18]
+                mpc_state[i, 9:12] = self.ang_vel_to_rpy_rates(  # body → Euler rates
+                    np.array([roll, pitch, yaw]), body_rates
+                )
             mpc_state_tensor = torch.tensor(mpc_state, dtype=torch.float32, device='cpu')
 
             # Apply observation preprocessor (normalization) if available

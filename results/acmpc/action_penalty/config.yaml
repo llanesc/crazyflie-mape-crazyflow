@@ -72,12 +72,10 @@ environment:
 
 # Policy settings (ACMPC specific)
 policy:
-  # Cost formulation: "qp" (J=0.5*x'Qx + p'x) or "linear_ls" (J=0.5*||y-y_ref||_W^2)
-  cost_type: "linear_ls"
-  pos_offset_max: 0.25  # Max position reference offset [m] (LINEAR_LS only)
+  pos_offset_max: 0.25  # Max position reference offset [m]
 
   # MPC settings
-  mpc_model: "so_rpy_rotor_drag"  # "so_rpy" or "so_rpy_rotor_drag"
+  mpc_model: "so_rpy"  # "so_rpy" or "so_rpy_rotor_drag"
   mpc_horizon: 2
   mpc_dt: 0.02
   mpc_velocity_max: null  # null to disable, or float value in m/s
@@ -89,6 +87,7 @@ policy:
   # Network architecture
   cost_net_sizes: [256, 256]
   value_net_sizes: [256, 256]
+  binary_embed_dim: 8  # Embedding dim for binary/one-hot obs dims (0 = disabled)
 
   # Activation functions (options: relu, tanh, elu, leaky_relu, gelu)
   cost_net_activation: "relu"
@@ -119,8 +118,10 @@ training:
 
   # Preprocessors (optional)
   # Options: "RunningStandardScaler" or null (no preprocessing)
-  observation_preprocessor: null
-  state_preprocessor: null
+  # Note: obs/state normalization hurts ACMPC early training (cold running stats
+  # distort MPC references → boundary-hugging, low win rate). Only normalize values.
+  observation_preprocessor: "RunningStandardScaler"
+  state_preprocessor: "RunningStandardScaler"
   value_preprocessor: "RunningStandardScaler"
 
   # Learning rate scheduler (optional)
@@ -135,11 +136,11 @@ training:
 
 # Reward settings
 rewards:
-  capture: -5.0
+  capture: -20.0
   red_crash: 30.0
-  rr_relative_velocity_coef: 1.0  # Bonus for red-red collisions scaled by ||v_rel||
-  blue_crash: -5.0
-  boundary: -5.0
+  rr_relative_velocity_coef: 3.0  # Bonus for red-red collisions scaled by ||v_rel||
+  blue_crash: -20.0
+  boundary: -20.0
   pursuer_proximity: 0.3
   pursuer_proximity_decay: 2.5
   # Angle penalty (penalizes orientation deviation from level flight)
@@ -411,7 +412,7 @@ curriculum:
       randomize_mass: true  # Randomize mass with normal distribution
       randomize_inertia: true  # Randomize inertia with normal distribution
       mass_randomization_std: 0.004  # Standard deviation for mass randomization [kg]
-      inertia_randomization_std: 1.0e-6  # Standard deviation for inertia randomization [kg*m^2]
+      inertia_randomization_std: 8.0e-6  # Standard deviation for inertia randomization [kg*m^2]
       # Disturbance forces/torques
       enable_disturbance: true  # Enable random disturbance forces and torques
       disturbance_force_std: 0.01  # Standard deviation for force disturbance [N]

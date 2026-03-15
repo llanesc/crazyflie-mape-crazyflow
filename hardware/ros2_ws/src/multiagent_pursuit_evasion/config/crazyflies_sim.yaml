@@ -36,10 +36,10 @@ robot_types:
       enabled: true
       default_topics:
         odom:
-          frequency: 50
+          frequency: 100
       custom_topics:
         body_rates:
-          frequency: 50
+          frequency: 100
           vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
     firmware_params:
       ring:
@@ -57,10 +57,10 @@ robot_types:
       enabled: true
       default_topics:
         odom:
-          frequency: 50
+          frequency: 100
       custom_topics:
         body_rates:
-          frequency: 50
+          frequency: 100
           vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
     firmware_params:
       ring:

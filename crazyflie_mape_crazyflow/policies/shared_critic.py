@@ -4,7 +4,7 @@ This module provides a centralized critic that uses shared state information
 for estimating state values in multi-agent settings.
 """
 
-from typing import Mapping, Tuple, Union
+from typing import List, Mapping, Optional, Tuple, Union
 
 import gymnasium
 import torch
@@ -56,6 +56,8 @@ class SharedCritic(DeterministicMixin, Model):
         clip_actions: bool = False,
         hidden_dim: int = 256,
         activation: str = "relu",
+        binary_dims: Optional[List[int]] = None,
+        binary_embed_dim: int = 8,
         **kwargs,
     ):
         """Initialize the value network.
@@ -68,14 +70,33 @@ class SharedCritic(DeterministicMixin, Model):
             hidden_dim: Hidden layer dimension.
             activation: Hidden layer activation function name
                 (relu, tanh, elu, leaky_relu, gelu).
+            binary_dims: Indices of binary/one-hot dimensions in the state.
+                These are projected through a learned linear embedding instead
+                of being passed directly, avoiding scale mismatch with the
+                normalized continuous features.
+            binary_embed_dim: Output dimension of the binary embedding layer.
         """
         Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         DeterministicMixin.__init__(self, clip_actions=clip_actions)
 
         obs_dim = gymnasium.spaces.flatdim(observation_space)
 
+        binary_dims = sorted(binary_dims) if binary_dims else []
+        continuous_dims = [i for i in range(obs_dim) if i not in set(binary_dims)]
+        n_binary = len(binary_dims)
+
+        self.register_buffer("_binary_idx", torch.tensor(binary_dims, dtype=torch.long))
+        self.register_buffer("_continuous_idx", torch.tensor(continuous_dims, dtype=torch.long))
+
+        if n_binary > 0:
+            self.binary_embed = nn.Linear(n_binary, binary_embed_dim)
+            value_net_input_dim = len(continuous_dims) + binary_embed_dim
+        else:
+            self.binary_embed = None
+            value_net_input_dim = obs_dim
+
         self.value_net = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+            nn.Linear(value_net_input_dim, hidden_dim),
             get_activation(activation),
             nn.Linear(hidden_dim, hidden_dim),
             get_activation(activation),
@@ -104,6 +125,12 @@ class SharedCritic(DeterministicMixin, Model):
 
         if state is None:
             raise ValueError("No state found in inputs")
+
+        if self.binary_embed is not None:
+            state = torch.cat([
+                state[:, self._continuous_idx],
+                self.binary_embed(state[:, self._binary_idx]),
+            ], dim=-1)
 
         value = self.value_net(state)
 

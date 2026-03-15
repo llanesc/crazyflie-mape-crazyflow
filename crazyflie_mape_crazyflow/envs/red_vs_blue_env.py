@@ -290,10 +290,10 @@ def _jit_compute_rewards(
     rpy_smoothness_penalty = reward_action_smoothness_rpy * ((rpy_diff ** 2).sum(axis=-1) * blue_alive.astype(jnp.float32)).sum(axis=1)
 
     total_reward = (reward_bb + reward_rr + reward_br + reward_fence + reward_proximity
-                    - angle_penalty 
+                    - angle_penalty
                     - velocity_penalty
-                    - energy_penalty 
-                    - thrust_smoothness_penalty 
+                    - energy_penalty
+                    - thrust_smoothness_penalty
                     - rpy_smoothness_penalty
                     # - ground_proximity_penalty
                     ) / n_pairs

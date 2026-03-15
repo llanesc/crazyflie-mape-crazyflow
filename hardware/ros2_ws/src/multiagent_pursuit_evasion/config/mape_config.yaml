@@ -8,7 +8,7 @@
 # ---- Episode selection ----
 # Name of the episode to run (must match an entry in `episodes` below).
 # Override from CLI with: --episode <name>
-active_episode: ep7
+active_episode: ep4
 
 # ---- Episode definitions ----
 # Each episode defines initial positions for all agents after takeoff.
@@ -53,7 +53,7 @@ episodes:
 # ---- Curriculum / collision tolerances ----
 curriculum_level: 9            # Set to null to skip curriculum override
 bb_collision_tolerance: 0.2    # Blue-Blue collision distance (m)
-rr_collision_tolerance: 0.25    # Red-Red collision distance (m)
+rr_collision_tolerance: 0.2    # Red-Red collision distance (m)
 rb_collision_tolerance: 0.2    # Red-Blue capture distance (m)
 
 # ---- Takeoff transition thresholds ----

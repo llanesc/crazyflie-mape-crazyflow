@@ -42,7 +42,6 @@ from tqdm import tqdm
 from crazyflie_mape_crazyflow.envs import RedVsBlueEnv, RedVsBlueEnvConfig, RescaleActionWrapper
 from crazyflie_mape_crazyflow.envs.spawn import create_spawn_fn_from_config
 from crazyflie_mape_crazyflow.policies import (
-    LeapCSharedGaussianPolicyQP,
     LeapCSharedGaussianPolicyLinearLS,
     SharedCritic,
 )
@@ -964,6 +963,9 @@ def main():
         # Control limits
         roll_pitch_max=roll_pitch_max,
         yaw_max=yaw_max,
+        # Thrust limits (use saved values from training for consistency)
+        thrust_min=env_config.get("thrust_min"),
+        thrust_max=env_config.get("thrust_max"),
         # Physical parameters
         mass=mass,  # None uses drone_model default
         # Target assignment
@@ -1159,48 +1161,29 @@ def main():
     # Create policy (same architecture as training)
     # Note: roll_pitch_max, yaw_max, cost_net_activation, and cost_type were loaded earlier
     # Use env_cfg thrust limits for consistency with environment's action space
-    if cost_type == "linear_ls":
-        # Get pos_offset_max from config (for LINEAR_LS policy)
-        pos_offset_max = env_config.get("pos_offset_max", 1.0)
-        shared_policy = LeapCSharedGaussianPolicyLinearLS(
-            observation_space=sample_obs_space,
-            action_space=sample_action_space,
-            device=device,
-            mpc_horizon=mpc_horizon,
-            mpc_dt=mpc_dt,
-            hidden_dim=hidden_dim,
-            roll_pitch_max=env_cfg.roll_pitch_max,
-            yaw_max=env_cfg.yaw_max,
-            thrust_min=env_cfg.thrust_min,
-            thrust_max=env_cfg.thrust_max,
-            mass=mass,
-            gravity=env_cfg.gravity,
-            drone_model=drone_model,
-            mpc_model=env_config.get("mpc_model", "so_rpy"),
-            velocity_max=mpc_velocity_max,
-            activation=cost_net_activation,
-            pos_offset_max=pos_offset_max,
-        )
-    elif cost_type == "qp":
-        shared_policy = LeapCSharedGaussianPolicyQP(
-            observation_space=sample_obs_space,
-            action_space=sample_action_space,
-            device=device,
-            mpc_horizon=mpc_horizon,
-            mpc_dt=mpc_dt,
-            hidden_dim=hidden_dim,
-            roll_pitch_max=env_cfg.roll_pitch_max,
-            yaw_max=env_cfg.yaw_max,
-            thrust_min=env_cfg.thrust_min,
-            thrust_max=env_cfg.thrust_max,
-            mass=mass,
-            gravity=env_cfg.gravity,
-            drone_model=drone_model,
-            velocity_max=mpc_velocity_max,
-            activation=cost_net_activation,
-        )
-    else:
-        raise ValueError(f"Unknown cost_type: {cost_type}. Must be 'qp' or 'linear_ls'")
+    pos_offset_max = env_config.get("pos_offset_max", 1.0)
+    binary_embed_dim = env_config.get("binary_embed_dim", 0)
+    shared_policy = LeapCSharedGaussianPolicyLinearLS(
+        observation_space=sample_obs_space,
+        action_space=sample_action_space,
+        device=device,
+        mpc_horizon=mpc_horizon,
+        mpc_dt=mpc_dt,
+        hidden_dim=hidden_dim,
+        roll_pitch_max=env_cfg.roll_pitch_max,
+        yaw_max=env_cfg.yaw_max,
+        thrust_min=env_cfg.thrust_min,
+        thrust_max=env_cfg.thrust_max,
+        mass=mass,
+        gravity=env_cfg.gravity,
+        drone_model=drone_model,
+        mpc_model=env_config.get("mpc_model", "so_rpy"),
+        velocity_max=mpc_velocity_max,
+        activation=cost_net_activation,
+        pos_offset_max=pos_offset_max,
+        binary_dims=raw_env.obs_binary_dims if binary_embed_dim > 0 else None,
+        binary_embed_dim=binary_embed_dim,
+    )
 
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)

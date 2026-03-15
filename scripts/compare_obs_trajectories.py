@@ -20,6 +20,16 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
+# ── Color palettes ──────────────────────────────────────────────────────────
+# [hw, sim, extra] per agent type
+EVADER_COLORS = ['#003399', '#4488EE', '#88CCFF']   # dark→light blue
+PURSUER_COLORS = ['#8B0000', '#FF6600', '#CC0077']  # deep red, orange, red-magenta
+
+def source_colors(agent_name: str) -> list:
+    """Return [hw_color, sim_color, extra_color] for the agent."""
+    return EVADER_COLORS if agent_name.startswith('blue') else PURSUER_COLORS
+
+
 # ── Obs layout constants ────────────────────────────────────────────────────
 # HW (rosbag) obs: pos(3) vel(3) rpy(3) rpy_rates(3) [ally_onehot ...shared]
 HW_POS = slice(0, 3)
@@ -209,19 +219,25 @@ def align_time(hw: dict, sim: dict, align_motion: bool = False) -> tuple[np.ndar
 def plot_3panel(
     t_hw, t_sim, hw_data, sim_data, labels, ylabel_unit, title, save_path,
     hw_label="CrazySim", sim_label="Crazyflow", ylims=None, shared_ylim=False,
+    t_extra=None, extra_data=None, extra_label=None, agent_name="blue0",
 ):
     """Plot 3-panel comparison (e.g., X/Y/Z or Vx/Vy/Vz).
 
     Args:
         ylims: Optional list of (ymin, ymax) tuples for each panel.
         shared_ylim: If True, use the same y-axis range (max extent) for all panels.
+        t_extra/extra_data/extra_label: Optional third dataset.
+        agent_name: Used to pick evader (blue shades) or pursuer (red shades).
     """
+    colors = source_colors(agent_name)  # [hw, sim, extra]
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
     fig.suptitle(title, fontsize=14, fontweight="bold")
 
     for ax, lab, col in zip(axes, labels, range(3)):
-        ax.plot(t_hw, hw_data[:, col], "b-", linewidth=1.5, label=hw_label)
-        ax.plot(t_sim, sim_data[:, col], "r--", linewidth=1.5, label=sim_label)
+        ax.plot(t_hw, hw_data[:, col], color=colors[0], linestyle="-", linewidth=1.5, label=hw_label)
+        ax.plot(t_sim, sim_data[:, col], color=colors[1], linestyle="--", linewidth=1.5, label=sim_label)
+        if t_extra is not None and extra_data is not None:
+            ax.plot(t_extra, extra_data[:, col], color=colors[2], linestyle="-.", linewidth=1.5, label=extra_label)
         ax.set_ylabel(f"{lab} [{ylabel_unit}]")
         ax.legend(loc="upper right", fontsize=9)
         ax.grid(True, alpha=0.3)
@@ -233,7 +249,10 @@ def plot_3panel(
         max_range = 0
         panel_centers = []
         for col in range(3):
-            vals = np.concatenate([hw_data[:, col], sim_data[:, col]])
+            arrays = [hw_data[:, col], sim_data[:, col]]
+            if extra_data is not None:
+                arrays.append(extra_data[:, col])
+            vals = np.concatenate(arrays)
             vmin, vmax = vals.min(), vals.max()
             panel_centers.append((vmin + vmax) / 2)
             max_range = max(max_range, vmax - vmin)
@@ -248,11 +267,15 @@ def plot_3panel(
 
 
 def plot_combined(t_hw, t_sim, hw_agents, sim_agents, agent_names, save_path,
-                  hw_label="CrazySim", sim_label="Crazyflow"):
+                  hw_label="CrazySim", sim_label="Crazyflow",
+                  t_extra=None, extra_agents=None, extra_label=None):
     """Plot combined comparison grid: agents × (pos, vel, rpy)."""
     n_agents = len(agent_names)
     fig, axes = plt.subplots(3, n_agents, figsize=(5 * n_agents, 10), squeeze=False)
-    fig.suptitle(f"{hw_label} vs {sim_label} Observation Comparison", fontsize=14, fontweight="bold")
+    title = f"{hw_label} vs {sim_label}"
+    if extra_label:
+        title += f" vs {extra_label}"
+    fig.suptitle(f"{title} — Observation Comparison", fontsize=14, fontweight="bold")
 
     row_configs = [
         ("pos", ["X", "Y", "Z"], "m"),
@@ -260,30 +283,37 @@ def plot_combined(t_hw, t_sim, hw_agents, sim_agents, agent_names, save_path,
         ("rpy", ["Roll", "Pitch", "Yaw"], "rad"),
     ]
 
-    colors = {"X": "r", "Y": "g", "Z": "b", "Vx": "r", "Vy": "g", "Vz": "b",
-              "Roll": "r", "Pitch": "g", "Yaw": "b"}
+    # Component alphas within each source line (dim each component slightly)
+    component_alphas = [1.0, 0.7, 0.45]
+    linestyles = ["-", "--", "-."]
 
     for col_idx, name in enumerate(agent_names):
         display = name.replace("blue", "Blue ").replace("red", "Red ")
         hw_ag = hw_agents[name]
         sim_ag = sim_agents[name]
+        src_colors = source_colors(name)  # [hw, sim, extra]
 
         for row_idx, (key, labels, unit) in enumerate(row_configs):
             ax = axes[row_idx, col_idx]
+            has_extra = t_extra is not None and extra_agents is not None and name in extra_agents
+
             for k, lab in enumerate(labels):
-                c = colors[lab]
-                hw_vals = hw_ag[key][:, k]
-                sim_vals = sim_ag[key][:, k]
-                ax.plot(t_hw, hw_vals, color=c, linestyle="-", linewidth=1.2,
-                        label=f"{lab} {hw_label}", alpha=0.8)
-                ax.plot(t_sim, sim_vals, color=c, linestyle="--", linewidth=1.2,
-                        label=f"{lab} {sim_label}", alpha=0.8)
+                alpha = component_alphas[k]
+                ax.plot(t_hw, hw_ag[key][:, k], color=src_colors[0], linestyle=linestyles[0],
+                        linewidth=1.2, label=f"{lab} {hw_label}", alpha=alpha)
+                ax.plot(t_sim, sim_ag[key][:, k], color=src_colors[1], linestyle=linestyles[1],
+                        linewidth=1.2, label=f"{lab} {sim_label}", alpha=alpha)
+                if has_extra:
+                    extra_ag = extra_agents[name]
+                    ax.plot(t_extra, extra_ag[key][:, k], color=src_colors[2], linestyle=linestyles[2],
+                            linewidth=1.2, label=f"{lab} {extra_label}", alpha=alpha)
 
             if row_idx == 0:
                 ax.set_title(display, fontsize=11)
             if col_idx == 0:
                 ax.set_ylabel(f"{', '.join(labels)} [{unit}]")
-            ax.legend(fontsize=6, ncol=2, loc="upper right")
+            ncol = 3 if has_extra else 2
+            ax.legend(fontsize=6, ncol=ncol, loc="upper right")
             ax.grid(True, alpha=0.3)
             if row_idx == 2:
                 ax.set_xlabel("Time [s]")
@@ -294,35 +324,45 @@ def plot_combined(t_hw, t_sim, hw_agents, sim_agents, agent_names, save_path,
 
 
 def plot_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
-                         save_path, hw_label="CrazySim", sim_label="Crazyflow"):
+                         save_path, hw_label="CrazySim", sim_label="Crazyflow",
+                         extra_agents=None, extra_label=None):
     """Plot 3D trajectories for all agents. Evaders (blue) in blue, pursuers (red) in red."""
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection='3d')
 
+    all_pos_arrays = []
     for name in agent_names:
-        color = 'tab:blue' if name.startswith('blue') else 'tab:red'
+        src_colors = source_colors(name)
         hw_pos = hw_agents[name]['pos']
         sim_pos = sim_agents[name]['pos']
         label_prefix = name.replace('blue', 'Blue ').replace('red', 'Red ')
 
-        # CrazySim: solid line
         ax.plot(hw_pos[:, 0], hw_pos[:, 1], hw_pos[:, 2],
-                color=color, linewidth=1.5, label=f"{label_prefix} {hw_label}")
+                color=src_colors[0], linewidth=1.5, label=f"{label_prefix} {hw_label}")
         ax.scatter(hw_pos[0, 0], hw_pos[0, 1], hw_pos[0, 2],
-                   color=color, marker='o', s=40)
+                   color=src_colors[0], marker='o', s=40)
 
-        # Crazyflow: dashed line, lighter
         ax.plot(sim_pos[:, 0], sim_pos[:, 1], sim_pos[:, 2],
-                color=color, linewidth=1.5, linestyle='--', alpha=0.7,
+                color=src_colors[1], linewidth=1.5, linestyle='--',
                 label=f"{label_prefix} {sim_label}")
         ax.scatter(sim_pos[0, 0], sim_pos[0, 1], sim_pos[0, 2],
-                   color=color, marker='x', s=40)
+                   color=src_colors[1], marker='x', s=40)
+
+        all_pos_arrays += [hw_pos, sim_pos]
+
+        if extra_agents is not None and name in extra_agents:
+            ex_pos = extra_agents[name]['pos']
+            ax.plot(ex_pos[:, 0], ex_pos[:, 1], ex_pos[:, 2],
+                    color=src_colors[2], linewidth=1.5, linestyle='-.',
+                    label=f"{label_prefix} {extra_label}")
+            ax.scatter(ex_pos[0, 0], ex_pos[0, 1], ex_pos[0, 2],
+                       color=src_colors[2], marker='^', s=40)
+            all_pos_arrays.append(ex_pos)
 
     # Equal aspect ratio
-    all_pts = np.concatenate([hw_agents[n]['pos'] for n in agent_names] +
-                             [sim_agents[n]['pos'] for n in agent_names], axis=0)
+    all_pts = np.concatenate(all_pos_arrays, axis=0)
     margin = 0.15
     mins = all_pts.min(axis=0) - margin
     maxs = all_pts.max(axis=0) + margin
@@ -336,8 +376,28 @@ def plot_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
     ax.set_xlabel('X [m]')
     ax.set_ylabel('Y [m]')
     ax.set_zlabel('Z [m]')
-    ax.set_title(f'{hw_label} vs {sim_label} — 3D Trajectories')
-    ax.legend(fontsize=8, loc='upper left')
+    title = f'{hw_label} vs {sim_label}'
+    if extra_label:
+        title += f' vs {extra_label}'
+    ax.set_title(f'{title} — 3D Trajectories')
+
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    leg_elems = [
+        Patch(color='none', label=rf'$\mathbf{{{hw_label}}}$'),
+        Line2D([0], [0], color=EVADER_COLORS[0], lw=2, label='Evader'),
+        Line2D([0], [0], color=PURSUER_COLORS[0], lw=2, label='Pursuer'),
+        Patch(color='none', label=rf'$\mathbf{{{sim_label}}}$'),
+        Line2D([0], [0], color=EVADER_COLORS[1], lw=2, ls='--', label='Evader'),
+        Line2D([0], [0], color=PURSUER_COLORS[1], lw=2, ls='--', label='Pursuer'),
+    ]
+    if extra_label:
+        leg_elems += [
+            Patch(color='none', label=rf'$\mathbf{{{extra_label}}}$'),
+            Line2D([0], [0], color=EVADER_COLORS[2], lw=2, ls='-.', label='Evader'),
+            Line2D([0], [0], color=PURSUER_COLORS[2], lw=2, ls='-.', label='Pursuer'),
+        ]
+    ax.legend(handles=leg_elems, fontsize=8, loc='upper left')
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
@@ -359,7 +419,8 @@ def _rpy_to_rotation_matrix(roll, pitch, yaw):
 def animate_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
                              save_path, hw_label="CrazySim", sim_label="Crazyflow",
                              fps=50, arm_len=0.04, slowdown=3,
-                             hw_runs=None):
+                             hw_runs=None,
+                             t_extra=None, extra_agents=None, extra_label=None):
     """Create animated 3D GIF with oriented cross markers at current drone positions.
 
     Each drone is drawn as an X-shaped cross oriented by its RPY angles.
@@ -452,38 +513,58 @@ def animate_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
         t_frames_r, hw_interp_r, sim_interp_r = runs[run_idx]
         t_now = t_frames_r[local_idx]
 
-        run_label = f" (run {run_idx + 1}/{n_runs})" if n_runs > 1 else ""
-        ax.set_title(f'{hw_label} vs {sim_label} — t = {t_now:.2f}s{run_label}')
-
         # Smooth rotation: 360 degrees over all frames
         ax.view_init(elev=elev, azim=-60 + global_frame * 360 / max(total_frames - 1, 1))
 
         trail = slice(0, local_idx + 1)
 
         for name in agent_names:
-            color = 'tab:blue' if name.startswith('blue') else 'tab:red'
+            src_colors = source_colors(name)
 
             hw_pos = hw_interp_r[name]["pos"]
             hw_rpy = hw_interp_r[name]["rpy"]
             ax.plot(hw_pos[trail, 0], hw_pos[trail, 1], hw_pos[trail, 2],
-                    color=color, linewidth=1.2, alpha=0.6)
-            draw_cross(ax, hw_pos[local_idx], hw_rpy[local_idx], color,
+                    color=src_colors[0], linewidth=1.2, alpha=0.8)
+            draw_cross(ax, hw_pos[local_idx], hw_rpy[local_idx], src_colors[0],
                        linestyle='-', lw=2.5)
 
             sim_pos = sim_interp_r[name]["pos"]
             sim_rpy = sim_interp_r[name]["rpy"]
             ax.plot(sim_pos[trail, 0], sim_pos[trail, 1], sim_pos[trail, 2],
-                    color=color, linewidth=1.2, linestyle='--', alpha=0.4)
-            draw_cross(ax, sim_pos[local_idx], sim_rpy[local_idx], color,
-                       linestyle='--', lw=2.0, alpha=0.7)
+                    color=src_colors[1], linewidth=1.2, linestyle='--', alpha=0.8)
+            draw_cross(ax, sim_pos[local_idx], sim_rpy[local_idx], src_colors[1],
+                       linestyle='--', lw=2.0, alpha=0.9)
+
+            if extra_agents is not None and name in extra_agents:
+                ex_interp = interp_agent(t_extra, extra_agents[name], t_frames_r)
+                ex_pos = ex_interp["pos"]
+                ex_rpy = ex_interp["rpy"]
+                ax.plot(ex_pos[trail, 0], ex_pos[trail, 1], ex_pos[trail, 2],
+                        color=src_colors[2], linewidth=1.2, linestyle='-.', alpha=0.8)
+                draw_cross(ax, ex_pos[local_idx], ex_rpy[local_idx], src_colors[2],
+                           linestyle='-.', lw=2.0, alpha=0.9)
 
         from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
         legend_elements = [
-            Line2D([0], [0], color='tab:blue', lw=2, label=f'Evader {hw_label}'),
-            Line2D([0], [0], color='tab:blue', lw=2, ls='--', label=f'Evader {sim_label}'),
-            Line2D([0], [0], color='tab:red', lw=2, label=f'Pursuer {hw_label}'),
-            Line2D([0], [0], color='tab:red', lw=2, ls='--', label=f'Pursuer {sim_label}'),
+            Patch(color='none', label=rf'$\mathbf{{{hw_label}}}$'),
+            Line2D([0], [0], color=EVADER_COLORS[0], lw=2, label='Evader'),
+            Line2D([0], [0], color=PURSUER_COLORS[0], lw=2, label='Pursuer'),
+            Patch(color='none', label=rf'$\mathbf{{{sim_label}}}$'),
+            Line2D([0], [0], color=EVADER_COLORS[1], lw=2, ls='--', label='Evader'),
+            Line2D([0], [0], color=PURSUER_COLORS[1], lw=2, ls='--', label='Pursuer'),
         ]
+        if extra_label:
+            legend_elements += [
+                Patch(color='none', label=rf'$\mathbf{{{extra_label}}}$'),
+                Line2D([0], [0], color=EVADER_COLORS[2], lw=2, ls='-.', label='Evader'),
+                Line2D([0], [0], color=PURSUER_COLORS[2], lw=2, ls='-.', label='Pursuer'),
+            ]
+        title_str = f'{hw_label} vs {sim_label}'
+        if extra_label:
+            title_str += f' vs {extra_label}'
+        run_label = f" (run {run_idx + 1}/{n_runs})" if n_runs > 1 else ""
+        ax.set_title(f'{title_str} — t = {t_now:.2f}s{run_label}')
         ax.legend(handles=legend_elements, fontsize=8, loc='upper left')
 
     playback_fps = fps / slowdown
@@ -535,22 +616,28 @@ def compute_rms_errors(t_hw, t_sim, hw_agents, sim_agents, agent_names):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("hw_csv", help="CrazySim/rosbag obs CSV")
+    parser.add_argument("hw_csv", help="Hardware/rosbag obs CSV")
     parser.add_argument("--sim-csv", required=True, help="Crazyflow sim obs CSV")
+    parser.add_argument("--extra-csv", help="Optional third obs CSV (e.g. CrazySim)")
     parser.add_argument("--outdir", help="Output directory for plots")
-    parser.add_argument("--hw-label", default="CrazySim", help="Label for HW data")
+    parser.add_argument("--hw-label", default="Hardware", help="Label for HW data")
     parser.add_argument("--sim-label", default="Crazyflow", help="Label for sim data")
+    parser.add_argument("--extra-label", default="CrazySim", help="Label for extra data")
     parser.add_argument("--align-motion", action="store_true",
                         help="Align HW time to first motion (removes service startup delay)")
     args = parser.parse_args()
 
     hw = load_hw_csv(args.hw_csv)
     sim = load_sim_csv(args.sim_csv)
+    extra = load_hw_csv(args.extra_csv) if args.extra_csv else None
 
     print(f"HW:  {len(hw['time'])} samples, {hw['time'][-1]:.2f}s, "
           f"{hw['n_blue']} blue + {hw['n_red']} red")
     print(f"Sim: {len(sim['time'])} samples, {sim['time'][-1]:.2f}s, "
           f"{sim['n_blue']} blue + {sim['n_red']} red")
+    if extra:
+        print(f"Extra ({args.extra_label}): {len(extra['time'])} samples, {extra['time'][-1]:.2f}s, "
+              f"{extra['n_blue']} blue + {extra['n_red']} red")
 
     # Determine output directory
     if args.outdir:
@@ -559,22 +646,24 @@ def main():
         outdir = Path(args.sim_csv).parent / "crazysim_vs_crazyflow"
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Align time
+    # Align time for hw vs sim
     hw_mask, sim_mask, hw_mask_full, sim_mask_full = align_time(hw, sim, align_motion=args.align_motion)
     t_hw = hw["time"][hw_mask]
     t_sim = sim["time"][sim_mask]
-    t_hw_full = hw["time"][hw_mask_full]
-    t_sim_full = sim["time"][sim_mask_full]
 
     hw_agents = {k: {sk: v[hw_mask] for sk, v in ag.items()} for k, ag in hw["agents"].items()}
     sim_agents = {k: {sk: v[sim_mask] for sk, v in ag.items()} for k, ag in sim["agents"].items()}
-    hw_agents_full = {k: {sk: v[hw_mask_full] for sk, v in ag.items()} for k, ag in hw["agents"].items()}
-    sim_agents_full = {k: {sk: v[sim_mask_full] for sk, v in ag.items()} for k, ag in sim["agents"].items()}
+
+    # Align extra (CrazySim) independently vs sim
+    t_extra = None
+    extra_agents = None
+    if extra:
+        ex_mask, _, _, _ = align_time(extra, sim, align_motion=args.align_motion)
+        t_extra = extra["time"][ex_mask]
+        extra_agents = {k: {sk: v[ex_mask] for sk, v in ag.items()} for k, ag in extra["agents"].items()}
 
     # Common agents
     agent_names = sorted(set(hw["agents"].keys()) & set(sim["agents"].keys()))
-    blue_names = [n for n in agent_names if n.startswith("blue")]
-    red_names = [n for n in agent_names if n.startswith("red")]
 
     print(f"Common agents: {agent_names}")
     print(f"Aligned time: 0 to {min(t_hw[-1], t_sim[-1]):.2f}s")
@@ -584,27 +673,34 @@ def main():
         display = name.replace("blue", "Blue ").replace("red", "Red ")
         hw_ag = hw_agents[name]
         sim_ag = sim_agents[name]
+        ex_ag = extra_agents.get(name) if extra_agents else None
 
         # Position
         plot_3panel(t_hw, t_sim, hw_ag["pos"], sim_ag["pos"],
                     ["X", "Y", "Z"], "m", f"{display} - Position Comparison",
                     outdir / f"{name}_position.png",
                     hw_label=args.hw_label, sim_label=args.sim_label,
-                    shared_ylim=True)
+                    shared_ylim=True, agent_name=name,
+                    t_extra=t_extra, extra_data=ex_ag["pos"] if ex_ag else None,
+                    extra_label=args.extra_label if extra else None)
 
         # Velocity
         plot_3panel(t_hw, t_sim, hw_ag["vel"], sim_ag["vel"],
                     ["Vx", "Vy", "Vz"], "m/s", f"{display} - Velocity Comparison",
                     outdir / f"{name}_velocity.png",
                     hw_label=args.hw_label, sim_label=args.sim_label,
-                    shared_ylim=True)
+                    shared_ylim=True, agent_name=name,
+                    t_extra=t_extra, extra_data=ex_ag["vel"] if ex_ag else None,
+                    extra_label=args.extra_label if extra else None)
 
         # RPY
         plot_3panel(t_hw, t_sim, hw_ag["rpy"], sim_ag["rpy"],
                     ["Roll", "Pitch", "Yaw"], "rad", f"{display} - RPY Angles Comparison",
                     outdir / f"{name}_rpy.png",
                     hw_label=args.hw_label, sim_label=args.sim_label,
-                    ylims=[(-0.3, 0.3), (-0.3, 0.3), (-0.15, 0.15)])
+                    ylims=[(-0.3, 0.3), (-0.3, 0.3), (-0.15, 0.15)], agent_name=name,
+                    t_extra=t_extra, extra_data=ex_ag["rpy"] if ex_ag else None,
+                    extra_label=args.extra_label if extra else None)
 
         # Body rates (skip if NaN for red)
         if not np.all(np.isnan(hw_ag["rpy_rates"])):
@@ -612,25 +708,34 @@ def main():
                         ["Roll Rate", "Pitch Rate", "Yaw Rate"], "rad/s",
                         f"{display} - Body Rates Comparison",
                         outdir / f"{name}_body_rates.png",
-                        hw_label=args.hw_label, sim_label=args.sim_label)
+                        hw_label=args.hw_label, sim_label=args.sim_label,
+                        agent_name=name,
+                        t_extra=t_extra, extra_data=ex_ag["rpy_rates"] if ex_ag else None,
+                        extra_label=args.extra_label if extra else None)
 
     # Combined comparison
     plot_combined(t_hw, t_sim, hw_agents, sim_agents, agent_names,
                   outdir / "combined_comparison.png",
-                  hw_label=args.hw_label, sim_label=args.sim_label)
+                  hw_label=args.hw_label, sim_label=args.sim_label,
+                  t_extra=t_extra, extra_agents=extra_agents,
+                  extra_label=args.extra_label if extra else None)
 
     # 3D trajectory plot
     plot_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
                          outdir / "trajectories_3d.png",
-                         hw_label=args.hw_label, sim_label=args.sim_label)
+                         hw_label=args.hw_label, sim_label=args.sim_label,
+                         extra_agents=extra_agents,
+                         extra_label=args.extra_label if extra else None)
 
-    # Animated 3D trajectory GIF — replay same run 10 times for full 360 rotation
+    # Animated 3D trajectory — replay same run 10 times for full 360 rotation
     hw_runs_data = [(t_hw, hw_agents)] * 10
 
     animate_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents,
                             agent_names, outdir / "trajectories_3d.mp4",
                             hw_label=args.hw_label, sim_label=args.sim_label,
-                            hw_runs=hw_runs_data)
+                            hw_runs=hw_runs_data,
+                            t_extra=t_extra, extra_agents=extra_agents,
+                            extra_label=args.extra_label if extra else None)
 
     # RMS errors
     compute_rms_errors(t_hw, t_sim, hw_agents, sim_agents, agent_names)
