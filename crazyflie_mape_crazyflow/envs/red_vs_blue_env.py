@@ -878,8 +878,11 @@ class RedVsBlueEnv(gym.Env):
         # - Red target assignments: n_red * n_blue
         self.obs_dim = 18 + n + n * 7 + n * 7 + n * n
 
-        # MPC state dimension for internal use (Euler dynamics)
-        self.mpc_state_dim = 12  # [pos(3), rpy(3), vel(3), drpy(3)]
+        # MPC state dimension
+        if self.cfg.mpc_state_type == "euler":
+            self.mpc_state_dim = 12  # [pos(3), rpy(3), vel(3), drpy(3)]
+        else:
+            self.mpc_state_dim = 13  # [pos(3), quat(4:xyzw), vel(3), ang_vel(3)]
 
         # Observation space (dict for each agent)
         self.observation_space = spaces.Dict({
@@ -1827,22 +1830,38 @@ class RedVsBlueEnv(gym.Env):
             sample_agent = self.possible_agents[0]
             info["reward/mean"] = float(rewards[sample_agent].mean())
 
-        # MPC state per blue agent: [pos(3), rpy(3), vel(3), drpy(3)] = 12
-        # Uses cached values from _get_observations() (called earlier in same step/reset)
+        # MPC state per blue agent
         B = self.cfg.n_blue
         sim_states = self.sim.data.states
         blue_pos = np.asarray(sim_states.pos)[:, :B]
         blue_vel = np.asarray(sim_states.vel)[:, :B]
-        blue_rpy = self._cached_blue_rpy
-        blue_drpy = self._cached_blue_rpy_rates
-        if blue_rpy is not None and blue_drpy is not None:
+
+        if self.cfg.mpc_state_type == "euler":
+            # Euler state: [pos(3), rpy(3), vel(3), drpy(3)] = 12
+            from scipy.spatial.transform import Rotation as R
+            from drone_models.utils.rotation import ang_vel2rpy_rates
+
+            blue_quat = np.asarray(sim_states.quat)[:, :B]
+            blue_ang_vel = np.asarray(sim_states.ang_vel)[:, :B]
+            # Convert quat -> rpy
+            orig_shape = blue_quat.shape  # (N, B, 4)
+            blue_rpy = R.from_quat(blue_quat.reshape(-1, 4)).as_euler("xyz").reshape(*orig_shape[:-1], 3)
+            # Convert ang_vel -> drpy
+            blue_drpy = ang_vel2rpy_rates(blue_quat.reshape(-1, 4), blue_ang_vel.reshape(-1, 3)).reshape(*orig_shape[:-1], 3)
             mpc_state_all = np.concatenate(
                 [blue_pos, blue_rpy, blue_vel, blue_drpy], axis=-1
             )  # (N, B, 12)
-            info["mpc_state"] = {
-                agent: mpc_state_all[:, i]
-                for i, agent in enumerate(self.possible_agents)
-            }
+        else:
+            # Quaternion state: [pos(3), quat(4:xyzw), vel(3), ang_vel(3)] = 13
+            blue_quat = np.asarray(sim_states.quat)[:, :B]
+            blue_ang_vel = np.asarray(sim_states.ang_vel)[:, :B]
+            mpc_state_all = np.concatenate(
+                [blue_pos, blue_quat, blue_vel, blue_ang_vel], axis=-1
+            )  # (N, B, 13)
+        info["mpc_state"] = {
+            agent: mpc_state_all[:, i]
+            for i, agent in enumerate(self.possible_agents)
+        }
 
         return info
 

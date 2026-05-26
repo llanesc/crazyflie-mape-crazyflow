@@ -151,6 +151,9 @@ class RedVsBlueEnvConfig:
     # Target assignment
     random_target_assignment: bool = False  # Randomize red->blue target assignment at reset
 
+    # MPC state representation
+    mpc_state_type: str = "euler"  # "quat" (13D) or "euler" (12D RPY+drpy)
+
     # Device
     device: str = "cpu"
 

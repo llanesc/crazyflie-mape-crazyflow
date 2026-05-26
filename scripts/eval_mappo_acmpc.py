@@ -988,6 +988,8 @@ def main():
         reward_pursuer_proximity_decay=learning_config.get("rewards", {}).get("pursuer_proximity_decay", 2.0) if learning_config else 2.0,
         # Episode length
         episode_length_s=learning_config.get("episode_length_s", 20.0) if learning_config else 20.0,
+        # MPC state type
+        mpc_state_type=env_config.get("state_type", "euler"),
     )
 
     # Handle curriculum level selection
@@ -1178,6 +1180,8 @@ def main():
         gravity=env_cfg.gravity,
         drone_model=drone_model,
         mpc_model=env_config.get("mpc_model", "so_rpy"),
+        state_type=env_config.get("state_type", "euler"),
+        integrator=env_config.get("integrator", "rk4"),
         velocity_max=mpc_velocity_max,
         activation=cost_net_activation,
         pos_offset_max=pos_offset_max,

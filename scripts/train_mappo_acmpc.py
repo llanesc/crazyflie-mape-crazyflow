@@ -487,6 +487,13 @@ def main():
     timesteps = training_cfg["timesteps"]
     n_worlds = training_cfg["n_worlds"]
 
+    # Set seed for reproducibility
+    seed = training_cfg.get("seed", None)
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        print(f"Random seed set to {seed}")
+
     # Set torch device
     device = torch.device(device_str)
 
@@ -578,6 +585,8 @@ def main():
         "binary_embed_dim": policy_cfg.get("binary_embed_dim", 0),
         # MPC dynamics model
         "mpc_model": policy_cfg.get("mpc_model", "so_rpy"),
+        "state_type": policy_cfg.get("state_type", "quat"),
+        "integrator": policy_cfg.get("integrator", "euler"),
         # Frequencies
         "control_freq": env_cfg.control_freq,
         "mellinger_freq": env_cfg.mellinger_freq,
@@ -654,6 +663,7 @@ def main():
 
     # Save learning config (training hyperparameters and rewards)
     learning_config = {
+        "seed": seed,
         "timesteps": timesteps,
         "n_worlds": n_worlds,
         # Rewards
@@ -774,6 +784,8 @@ def main():
         gravity=env_cfg.gravity,
         drone_model=env_cfg.drone_model,
         mpc_model=policy_cfg.get("mpc_model", "so_rpy"),
+        state_type=policy_cfg.get("state_type", "quat"),
+        integrator=policy_cfg.get("integrator", "euler"),
         n_batch_max=n_batch_max,
         initial_log_std=policy_cfg["initial_log_std"],
         velocity_max=policy_cfg["mpc_velocity_max"],
@@ -892,8 +904,9 @@ def main():
     )
 
     # Create MAPPO_MPC agent (extends MAPPO with MPC state passthrough)
+    mpc_state_size = 12 if policy_cfg.get("state_type", "quat") == "euler" else 13
     agent = MAPPO_MPC(
-        mpc_state_size=12,  # [pos(3), rpy(3), vel(3), drpy(3)]
+        mpc_state_size=mpc_state_size,
         possible_agents=env.possible_agents,
         models=models,
         memories=memories,

@@ -1,4 +1,4 @@
-"""LEAP-C MPC integration with so_rpy Euler dynamics.
+"""LEAP-C MPC integration with so_rpy dynamics (quaternion state, 13D).
 
 Supports two cost formulations:
 - QP: J = 0.5 * x'Qx + p'x (default, backward compatible)
@@ -23,6 +23,11 @@ from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp_linear_ls import (
     create_quadrotor_params_linear_ls,
     export_parametric_ocp_linear_ls,
     get_learnable_param_dim_linear_ls,
+    # Euler (12D) variants for backward compatibility
+    create_quadrotor_params_linear_ls_euler,
+    export_parametric_ocp_linear_ls_euler,
+    get_learnable_param_dim_linear_ls_euler,
+    NX_EULER,
 )
 
 from crazyflie_mape_crazyflow.leap_c.quadrotor_planner import (
@@ -46,6 +51,11 @@ __all__ = [
     "create_quadrotor_params_linear_ls",
     "export_parametric_ocp_linear_ls",
     "get_learnable_param_dim_linear_ls",
+    # LINEAR_LS Euler (12D) variants
+    "create_quadrotor_params_linear_ls_euler",
+    "export_parametric_ocp_linear_ls_euler",
+    "get_learnable_param_dim_linear_ls_euler",
+    "NX_EULER",
     # Planner
     "QuadrotorPlanner",
     "QuadrotorPlannerConfig",

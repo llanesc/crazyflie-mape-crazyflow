@@ -15,6 +15,9 @@ import argparse
 import sys
 from pathlib import Path
 
+import matplotlib
+matplotlib.rcParams['pdf.fonttype'] = 42
+matplotlib.rcParams['ps.fonttype'] = 42
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -329,7 +332,7 @@ def plot_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
     """Plot 3D trajectories for all agents. Evaders (blue) in blue, pursuers (red) in red."""
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
-    fig = plt.figure(figsize=(12, 9))
+    fig = plt.figure(figsize=(9, 7))
     ax = fig.add_subplot(111, projection='3d')
 
     all_pos_arrays = []
@@ -361,26 +364,25 @@ def plot_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
                        color=src_colors[2], marker='^', s=40)
             all_pos_arrays.append(ex_pos)
 
-    # Equal aspect ratio
+    # Tight aspect ratio preserving relative scale
     all_pts = np.concatenate(all_pos_arrays, axis=0)
-    margin = 0.15
+    margin = 0.05
     mins = all_pts.min(axis=0) - margin
     maxs = all_pts.max(axis=0) + margin
+    ranges = maxs - mins
+    # Ensure minimum range so axes aren't collapsed
+    ranges = np.maximum(ranges, 0.2)
     centers = (mins + maxs) / 2
-    max_range = (maxs - mins).max() / 2
-    ax.set_xlim(centers[0] - max_range, centers[0] + max_range)
-    ax.set_ylim(centers[1] - max_range, centers[1] + max_range)
-    ax.set_zlim(centers[2] - max_range, centers[2] + max_range)
-    ax.set_box_aspect([1, 1, 1])
+    ax.set_xlim(centers[0] - ranges[0] / 2, centers[0] + ranges[0] / 2)
+    ax.set_ylim(centers[1] - ranges[1] / 2, centers[1] + ranges[1] / 2)
+    ax.set_zlim(centers[2] - ranges[2] / 2, centers[2] + ranges[2] / 2)
+    ax.set_box_aspect(ranges / ranges.max())
 
-    ax.set_xlabel('X [m]')
-    ax.set_ylabel('Y [m]')
-    ax.set_zlabel('Z [m]')
-    title = f'{hw_label} vs {sim_label}'
-    if extra_label:
-        title += f' vs {extra_label}'
-    ax.set_title(f'{title} — 3D Trajectories')
-
+    ax.set_xlabel('X [m]', fontsize=9, labelpad=1)
+    ax.set_ylabel('Y [m]', fontsize=9, labelpad=1)
+    ax.set_zlabel('Z [m]', fontsize=9, labelpad=1)
+    ax.tick_params(labelsize=7, pad=0)
+    ax.yaxis.set_major_locator(plt.MultipleLocator(0.5))
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
     leg_elems = [
@@ -397,9 +399,9 @@ def plot_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
             Line2D([0], [0], color=EVADER_COLORS[2], lw=2, ls='-.', label='Evader'),
             Line2D([0], [0], color=PURSUER_COLORS[2], lw=2, ls='-.', label='Pursuer'),
         ]
-    ax.legend(handles=leg_elems, fontsize=8, loc='upper left')
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
+    ax.legend(handles=leg_elems, fontsize=7, loc='center left', bbox_to_anchor=(0.88, 0.5))
+    ax.view_init(elev=15, azim=10)
+    fig.savefig(save_path, dpi=150, bbox_inches='tight', pad_inches=0.05)
     plt.close(fig)
 
 
@@ -713,6 +715,101 @@ def main():
                         t_extra=t_extra, extra_data=ex_ag["rpy_rates"] if ex_ag else None,
                         extra_label=args.extra_label if extra else None)
 
+    # Side-by-side evader position comparison PDF
+    blue_names = [n for n in agent_names if n.startswith('blue')]
+    if len(blue_names) >= 2:
+        fig, all_axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
+        for col_idx, name in enumerate(blue_names[:2]):
+            display = f"Evader {col_idx + 1}"
+            hw_ag = hw_agents[name]
+            sim_ag = sim_agents[name]
+            ex_ag = extra_agents.get(name) if extra_agents else None
+            colors = source_colors(name)
+            for row, lab in enumerate(["X", "Y", "Z"]):
+                ax = all_axes[row, col_idx]
+                ax.plot(t_hw, hw_ag["pos"][:, row], color=colors[0], linestyle="-", linewidth=1.5, label=args.hw_label)
+                ax.plot(t_sim, sim_ag["pos"][:, row], color=colors[1], linestyle="--", linewidth=1.5, label=args.sim_label)
+                if ex_ag is not None and t_extra is not None:
+                    ax.plot(t_extra, ex_ag["pos"][:, row], color=colors[2], linestyle="-.", linewidth=1.5, label=args.extra_label)
+                ax.set_ylabel(f"{lab} [m]", fontsize=18)
+                ax.grid(True, alpha=0.3)
+                ax.tick_params(labelsize=16)
+                ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))
+                ax.yaxis.set_major_locator(plt.MultipleLocator(0.2))
+                if row == 0:
+                    ax.set_title(display, fontsize=20, fontweight='bold')
+                if row == 0 and col_idx == 0:
+                    ax.legend(loc="upper left", fontsize=14)
+            all_axes[2, col_idx].set_xlabel("Time [s]", fontsize=18)
+        # Same y-range size per row, centered on each column's data, snapped to tick spacing
+        for row in range(3):
+            ranges_list = []
+            centers_list = []
+            for c in range(2):
+                ylo, yhi = all_axes[row, c].get_ylim()
+                ranges_list.append(yhi - ylo)
+                centers_list.append((ylo + yhi) / 2)
+            max_range = max(ranges_list)
+            # Snap limits to tick spacing so ticks appear at top and bottom
+            tick_spacing = 0.2
+            for c in range(2):
+                lo = centers_list[c] - max_range / 2
+                hi = centers_list[c] + max_range / 2
+                # Round outward to nearest tick
+                import math
+                lo = math.floor(lo / tick_spacing) * tick_spacing
+                hi = math.ceil(hi / tick_spacing) * tick_spacing
+                all_axes[row, c].set_ylim(lo, hi)
+        fig.tight_layout()
+        fig.savefig(outdir / "evader_positions.pdf", dpi=150, bbox_inches='tight', pad_inches=0.1)
+        plt.close(fig)
+
+    # Side-by-side pursuer position comparison PDF
+    red_names = [n for n in agent_names if n.startswith('red')]
+    if len(red_names) >= 2:
+        fig, all_axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
+        for col_idx, name in enumerate(red_names[:2]):
+            display = f"Pursuer {col_idx + 1}"
+            hw_ag = hw_agents[name]
+            sim_ag = sim_agents[name]
+            ex_ag = extra_agents.get(name) if extra_agents else None
+            colors = source_colors(name)
+            for row, lab in enumerate(["X", "Y", "Z"]):
+                ax = all_axes[row, col_idx]
+                ax.plot(t_hw, hw_ag["pos"][:, row], color=colors[0], linestyle="-", linewidth=1.5, label=args.hw_label)
+                ax.plot(t_sim, sim_ag["pos"][:, row], color=colors[1], linestyle="--", linewidth=1.5, label=args.sim_label)
+                if ex_ag is not None and t_extra is not None:
+                    ax.plot(t_extra, ex_ag["pos"][:, row], color=colors[2], linestyle="-.", linewidth=1.5, label=args.extra_label)
+                ax.set_ylabel(f"{lab} [m]", fontsize=18)
+                ax.grid(True, alpha=0.3)
+                ax.tick_params(labelsize=16)
+                ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))
+                ax.yaxis.set_major_locator(plt.MultipleLocator(0.2))
+                if row == 0:
+                    ax.set_title(display, fontsize=20, fontweight='bold')
+                if row == 0 and col_idx == 0:
+                    ax.legend(loc="upper left", fontsize=14)
+            all_axes[2, col_idx].set_xlabel("Time [s]", fontsize=18)
+        for row in range(3):
+            ranges_list = []
+            centers_list = []
+            for c in range(2):
+                ylo, yhi = all_axes[row, c].get_ylim()
+                ranges_list.append(yhi - ylo)
+                centers_list.append((ylo + yhi) / 2)
+            max_range = max(ranges_list)
+            tick_spacing = 0.2
+            for c in range(2):
+                lo = centers_list[c] - max_range / 2
+                hi = centers_list[c] + max_range / 2
+                import math
+                lo = math.floor(lo / tick_spacing) * tick_spacing
+                hi = math.ceil(hi / tick_spacing) * tick_spacing
+                all_axes[row, c].set_ylim(lo, hi)
+        fig.tight_layout()
+        fig.savefig(outdir / "pursuer_positions.pdf", dpi=150, bbox_inches='tight', pad_inches=0.1)
+        plt.close(fig)
+
     # Combined comparison
     plot_combined(t_hw, t_sim, hw_agents, sim_agents, agent_names,
                   outdir / "combined_comparison.png",
@@ -722,7 +819,7 @@ def main():
 
     # 3D trajectory plot
     plot_3d_trajectories(t_hw, t_sim, hw_agents, sim_agents, agent_names,
-                         outdir / "trajectories_3d.png",
+                         outdir / "trajectories_3d.pdf",
                          hw_label=args.hw_label, sim_label=args.sim_label,
                          extra_agents=extra_agents,
                          extra_label=args.extra_label if extra else None)

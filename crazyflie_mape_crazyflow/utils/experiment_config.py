@@ -48,6 +48,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> RedVsBlueEn
         Spawn configuration is handled separately via get_spawn_fn_from_config().
     """
     env_cfg = config.get("environment", {})
+    policy_cfg = config.get("policy", {})
     training_cfg = config.get("training", {})
     rewards_cfg = config.get("rewards", {})
 
@@ -178,6 +179,10 @@ def config_to_env_config(config: dict, device: str | None = None) -> RedVsBlueEn
     if "action_smoothness_rpy" in rewards_cfg:
         kwargs["reward_action_smoothness_rpy"] = rewards_cfg["action_smoothness_rpy"]
 
+    # MPC state type (from policy config)
+    if "state_type" in policy_cfg:
+        kwargs["mpc_state_type"] = policy_cfg["state_type"]
+
     # Training settings (n_worlds and device)
     if "n_worlds" in training_cfg:
         kwargs["n_worlds"] = training_cfg["n_worlds"]
@@ -283,6 +288,9 @@ def get_policy_config(config: dict, policy_type: str) -> dict:
             "pos_offset_max": policy_cfg.get("pos_offset_max", 1.0),
             # MPC dynamics model
             "mpc_model": policy_cfg.get("mpc_model", "so_rpy"),
+            # MPC state representation and integrator
+            "state_type": policy_cfg.get("state_type", "quat"),
+            "integrator": policy_cfg.get("integrator", "euler"),
         }
     elif policy_type == "ffn":
         policy_net_sizes = policy_cfg.get("policy_net_sizes", [256, 256])

@@ -26,7 +26,7 @@ from skrl.resources.schedulers.torch import KLAdaptiveLR
 class MAPPO_MPC(MAPPO):
     """MAPPO with MPC state support.
 
-    Extends MAPPO to store raw MPC state (e.g., [pos, rpy, vel, drpy]) in the
+    Extends MAPPO to store raw MPC state (e.g., [pos, quat, vel, ang_vel]) in the
     replay memory and pass it to the policy as inputs["mpc_state"] without any
     preprocessing/normalization.
 
@@ -34,11 +34,11 @@ class MAPPO_MPC(MAPPO):
         info["mpc_state"] = {agent_name: ndarray(N, mpc_state_size)}
 
     Args:
-        mpc_state_size: Dimension of the MPC state vector (default: 12).
+        mpc_state_size: Dimension of the MPC state vector (default: 13).
         **kwargs: All other arguments forwarded to MAPPO.__init__().
     """
 
-    def __init__(self, *, mpc_state_size: int = 12, **kwargs) -> None:
+    def __init__(self, *, mpc_state_size: int = 13, **kwargs) -> None:
         super().__init__(**kwargs)
         self._mpc_state_size = mpc_state_size
         self._current_mpc_state: dict[str, torch.Tensor] = {}

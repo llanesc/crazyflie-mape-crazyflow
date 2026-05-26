@@ -55,10 +55,11 @@ METRICS = [
         "ylabel": "Curriculum Level",
         "title": "Curriculum Level",
         "filename": "curriculum_level.pdf",
-        "ymin": 0.0,
+        "ymin": 1.0,
         "no_raw": True,
         "no_smooth": True,
         "prepend_zero": True,
+        "level_offset": True,
     },
     {
         "tag": "Reward / Total reward (mean)",
@@ -108,9 +109,12 @@ def plot_metric(metric: dict, runs: list, out_dir: str):
             print(f"  [warn] tag '{metric['tag']}' not found in {run['path']}")
             continue
 
+        if metric.get("level_offset", False):
+            values = values + 1.0
+
         if metric.get("prepend_zero", False):
             steps = np.concatenate([[0], steps])
-            values = np.concatenate([[0.0], values])
+            values = np.concatenate([[1.0], values])
 
         steps_m = steps / 1e6
 

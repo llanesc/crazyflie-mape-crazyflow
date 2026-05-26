@@ -1,9 +1,12 @@
-"""Quadrotor planner using leap-c AcadosPlanner with so_rpy Euler dynamics.
+"""Quadrotor planner using leap-c AcadosPlanner with so_rpy dynamics.
 
 This module provides a high-level planner interface for the quadrotor MPC
 that integrates with the leap-c library for differentiable MPC.
 
-State: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw] (12D)
+Supports two state representations:
+- Quaternion (13D): [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
+- Euler (12D): [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
+
 Control: [roll, pitch, yaw, thrust] (4D)
 
 Supports two cost formulations:
@@ -41,6 +44,8 @@ from .quadrotor_ocp_qp import (
 
 # Cost type literal for type hints
 CostType = Literal["qp", "linear_ls"]
+StateType = Literal["quat", "euler"]
+IntegratorType = Literal["rk4", "euler"]
 
 
 class QuadrotorHoverInitializer(AcadosDiffMpcInitializer):
@@ -161,6 +166,8 @@ class QuadrotorPlannerConfig:
     T_horizon: float = None  # Will be set in __post_init__
     param_interface: QuadrotorAcadosParamInterface = "stagewise"
     cost_type: CostType = "qp"  # "qp" or "linear_ls"
+    state_type: StateType = "quat"  # "quat" (13D) or "euler" (12D, for old runs)
+    integrator: IntegratorType = "rk4"  # "rk4" or "euler" (forward Euler)
     n_batch_max: int = 4096
     num_threads: int = 8
     drone_model: str = "cf2x_L250"
@@ -179,20 +186,24 @@ class QuadrotorPlannerConfig:
             self.T_horizon = self.N_horizon * self.dt
         if self.cost_type not in ("qp", "linear_ls"):
             raise ValueError(f"cost_type must be 'qp' or 'linear_ls', got '{self.cost_type}'")
+        if self.state_type not in ("quat", "euler"):
+            raise ValueError(f"state_type must be 'quat' or 'euler', got '{self.state_type}'")
+        if self.state_type == "euler" and self.cost_type == "qp":
+            raise ValueError("Euler state_type is only supported with cost_type='linear_ls'")
 
 
 class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
-    """Differentiable MPC planner for quadrotor with so_rpy Euler dynamics.
+    """Differentiable MPC planner for quadrotor with so_rpy dynamics.
 
     Integrates with leap-c's AcadosPlanner pattern for use with RL frameworks.
 
-    State: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw] (12D)
+    State: [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz] (13D)
     Control: [roll, pitch, yaw, thrust] (4D)
 
     For stagewise mode, the planner expects parameters in the order:
-    - q_state for each stage (N+1 stages): 12 * (N+1)
+    - q_state for each stage (N+1 stages): 13 * (N+1)
     - q_control for each stage (N stages): 4 * N
-    - p_x for each stage (N+1 stages): 12 * (N+1)
+    - p_x for each stage (N+1 stages): 13 * (N+1)
     - p_u for each stage (N stages): 4 * N
 
     Attributes:
@@ -221,24 +232,33 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         # Load drone physical parameters from drone-models
         self.drone_params = load_params(self.cfg.mpc_model, self.cfg.drone_model)
 
-        # Import correct OCP module based on cost type
+        # Import correct OCP module based on cost type and state type
         if self.cfg.cost_type == "qp":
             from .quadrotor_ocp_qp import (
                 create_quadrotor_params_qp as create_quadrotor_params,
                 export_parametric_ocp_qp as export_parametric_ocp,
                 get_learnable_param_dim_qp as get_learnable_param_dim,
             )
-            ocp_name = "quadrotor_so_rpy_euler_qp"
-        else:  # linear_ls
+            ocp_name = "quadrotor_so_rpy_qp"
+        elif self.cfg.state_type == "euler":
+            from .quadrotor_ocp_linear_ls import (
+                create_quadrotor_params_linear_ls_euler as create_quadrotor_params,
+                export_parametric_ocp_linear_ls_euler as export_parametric_ocp,
+                get_learnable_param_dim_linear_ls_euler as get_learnable_param_dim,
+                NX_EULER,
+            )
+            ocp_name = "quadrotor_so_rpy_euler_linear_ls"
+        else:  # linear_ls + quat
             from .quadrotor_ocp_linear_ls import (
                 create_quadrotor_params_linear_ls as create_quadrotor_params,
                 export_parametric_ocp_linear_ls as export_parametric_ocp,
                 get_learnable_param_dim_linear_ls as get_learnable_param_dim,
             )
-            ocp_name = "quadrotor_so_rpy_euler_linear_ls"
+            ocp_name = "quadrotor_so_rpy_linear_ls"
 
-        # Store get_learnable_param_dim for later use
+        # Store get_learnable_param_dim and state dim for later use
         self._get_learnable_param_dim = get_learnable_param_dim
+        self._nx = NX_EULER if self.cfg.state_type == "euler" else NX
 
         # Build kwargs shared by both cost types
         param_kwargs = dict(
@@ -266,10 +286,11 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             mass=self.cfg.mass,
             gravity=self.cfg.gravity,
         )
-        # linear_ls supports mpc_model selection
+        # linear_ls supports mpc_model and integrator selection
         if self.cfg.cost_type == "linear_ls":
             param_kwargs["mpc_model"] = self.cfg.mpc_model
             ocp_kwargs["mpc_model"] = self.cfg.mpc_model
+            ocp_kwargs["integrator"] = self.cfg.integrator
 
         # Create parameters
         params = (
@@ -278,10 +299,13 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             else params
         )
 
-        # Create parameter manager (using default SX for better performance)
+        # Create parameter manager
+        # Euler state type uses SX dynamics, quaternion uses MX from drone-models
+        casadi_type = "SX" if self.cfg.state_type == "euler" else "MX"
         param_manager = AcadosParameterManager(
             parameters=params,
             N_horizon=self.cfg.N_horizon,
+            casadi_type=casadi_type,
         )
 
         # Create OCP
@@ -319,8 +343,8 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         """Forward pass: solve MPC with given state and parameters.
 
         Args:
-            obs: Initial state x0 with shape (B, 12).
-                 Expected order: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
+            obs: Initial state x0 with shape (B, 13).
+                 Expected order: [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
             action: Not used (action comes from MPC solution).
             param: Learnable parameters with shape (B, n_learnable).
             ctx: Optional context for warmstarting.
@@ -329,7 +353,7 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             ctx: Updated context with solution info.
             u0: Optimal control at first step, shape (B, 4).
                  Order: [roll, pitch, yaw, thrust]
-            x_traj: State trajectory, shape (B, N+1, 12).
+            x_traj: State trajectory, shape (B, N+1, 13).
             u_traj: Control trajectory, shape (B, N, 4).
             value: Cost value, shape (B, 1).
         """
@@ -338,8 +362,8 @@ class QuadrotorPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             batch_size=obs.shape[0]
         )
 
-        # Extract state (first 13 elements)
-        x0 = obs[:, :NX]
+        # Extract state (first nx elements)
+        x0 = obs[:, :self._nx]
 
         return self.diff_mpc(
             x0=x0,

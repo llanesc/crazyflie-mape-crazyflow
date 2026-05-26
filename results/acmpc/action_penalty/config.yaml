@@ -76,6 +76,8 @@ policy:
 
   # MPC settings
   mpc_model: "so_rpy"  # "so_rpy" or "so_rpy_rotor_drag"
+  state_type: "euler"  # "quat" (13D quaternion) or "euler" (12D RPY+drpy, for old runs)
+  integrator: "rk4"  # "rk4" or "euler" (forward Euler)
   mpc_horizon: 2
   mpc_dt: 0.02
   mpc_velocity_max: null  # null to disable, or float value in m/s
@@ -87,7 +89,7 @@ policy:
   # Network architecture
   cost_net_sizes: [256, 256]
   value_net_sizes: [256, 256]
-  binary_embed_dim: 8  # Embedding dim for binary/one-hot obs dims (0 = disabled)
+  binary_embed_dim: 0  # Embedding dim for binary/one-hot obs dims (0 = disabled)
 
   # Activation functions (options: relu, tanh, elu, leaky_relu, gelu)
   cost_net_activation: "relu"
@@ -98,6 +100,7 @@ policy:
 
 # Training settings
 training:
+  seed: null
   timesteps: 2_000_000
   n_worlds: 128
   device: "cpu"  # "cpu" or "cuda"
@@ -120,8 +123,8 @@ training:
   # Options: "RunningStandardScaler" or null (no preprocessing)
   # Note: obs/state normalization hurts ACMPC early training (cold running stats
   # distort MPC references → boundary-hugging, low win rate). Only normalize values.
-  observation_preprocessor: "RunningStandardScaler"
-  state_preprocessor: "RunningStandardScaler"
+  observation_preprocessor: null
+  state_preprocessor: null
   value_preprocessor: "RunningStandardScaler"
 
   # Learning rate scheduler (optional)
@@ -136,11 +139,11 @@ training:
 
 # Reward settings
 rewards:
-  capture: -20.0
+  capture: -5.0
   red_crash: 30.0
-  rr_relative_velocity_coef: 3.0  # Bonus for red-red collisions scaled by ||v_rel||
-  blue_crash: -20.0
-  boundary: -20.0
+  rr_relative_velocity_coef: 1.0  # Bonus for red-red collisions scaled by ||v_rel||
+  blue_crash: -5.0
+  boundary: -5.0
   pursuer_proximity: 0.3
   pursuer_proximity_decay: 2.5
   # Angle penalty (penalizes orientation deviation from level flight)
@@ -160,7 +163,7 @@ curriculum:
   advance_threshold: 0.70  # fraction of blue wins to advance to next level
 
   levels:
-    - level: 0
+    - level: 1
       spawn:
         blue:
           method: "deterministic"
@@ -180,7 +183,7 @@ curriculum:
       rr_collision_tolerance: 0.5
       rb_collision_tolerance: 0.5
 
-    - level: 1
+    - level: 2
       spawn:
         blue:
           method: "deterministic"
@@ -200,7 +203,7 @@ curriculum:
       rr_collision_tolerance: 0.4
       rb_collision_tolerance: 0.4
 
-    - level: 2
+    - level: 3
       spawn:
         blue:
           method: "deterministic"
@@ -220,7 +223,7 @@ curriculum:
       rr_collision_tolerance: 0.4
       rb_collision_tolerance: 0.4
 
-    - level: 3
+    - level: 4
       spawn:
         blue:
           method: "deterministic"
@@ -245,7 +248,7 @@ curriculum:
       mass_randomization_std: 0.001  # Standard deviation for mass randomization [kg]
       inertia_randomization_std: 5.0e-7  # Standard deviation for inertia randomization [kg*m^2]
 
-    - level: 4
+    - level: 5
       spawn:
         blue:
           method: "deterministic"
@@ -270,7 +273,7 @@ curriculum:
       mass_randomization_std: 0.002  # Standard deviation for mass randomization [kg]
       inertia_randomization_std: 1.0e-6  # Standard deviation for inertia randomization [kg*m^2]
 
-    - level: 5
+    - level: 6
       spawn:
         blue:
           method: "deterministic"
@@ -299,7 +302,7 @@ curriculum:
       disturbance_force_std: 5.0e-3  # Standard deviation for force disturbance [N]
       disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]
 
-    - level: 6
+    - level: 7
       spawn:
         blue:
           method: "deterministic"
@@ -328,7 +331,7 @@ curriculum:
       disturbance_force_std: 5.0e-3  # Standard deviation for force disturbance [N]
       disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]
 
-    - level: 7
+    - level: 8
       spawn:
         blue:
           method: "deterministic"
@@ -357,7 +360,7 @@ curriculum:
       disturbance_force_std: 5.0e-3  # Standard deviation for force disturbance [N]
       disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]
 
-    - level: 8
+    - level: 9
       spawn:
         blue:
           method: "deterministic"
@@ -386,7 +389,7 @@ curriculum:
       disturbance_force_std: 0.005  # Standard deviation for force disturbance [N]
       disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]
 
-    - level: 9
+    - level: 10
       spawn:
         blue:
           method: "nominal_box"                                                                                                                                                                      
@@ -412,7 +415,7 @@ curriculum:
       randomize_mass: true  # Randomize mass with normal distribution
       randomize_inertia: true  # Randomize inertia with normal distribution
       mass_randomization_std: 0.004  # Standard deviation for mass randomization [kg]
-      inertia_randomization_std: 8.0e-6  # Standard deviation for inertia randomization [kg*m^2]
+      inertia_randomization_std: 2.0e-6  # Standard deviation for inertia randomization [kg*m^2]
       # Disturbance forces/torques
       enable_disturbance: true  # Enable random disturbance forces and torques
       disturbance_force_std: 0.01  # Standard deviation for force disturbance [N]

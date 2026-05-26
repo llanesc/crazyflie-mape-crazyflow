@@ -14,7 +14,10 @@ The NN outputs:
 Position reference: y_ref_pos = current_pos + offset, where offset in [-pos_offset_max, +pos_offset_max]
 This "nudging" approach is similar to EXTERNAL cost and works better for trajectory tracking.
 
-State: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw] (12D)
+Supports two state representations:
+- Quaternion (13D): [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
+- Euler (12D): [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
+
 Control: [roll, pitch, yaw, thrust] (4D)
 """
 
@@ -33,6 +36,7 @@ from crazyflie_mape_crazyflow.leap_c import (
 )
 from crazyflie_mape_crazyflow.leap_c.quadrotor_ocp_linear_ls import (
     NX,
+    NX_EULER,
     NU,
 )
 
@@ -60,7 +64,7 @@ class LeapCMPCLayerLinearLS(nn.Module):
     The layer outputs W (weights) and y_ref (references) separately,
     which are then passed to the MPC solver.
 
-    State: [pos(3), rpy(3), vel(3), drpy(3)] = 12D
+    State: [pos(3), quat(4:xyzw), vel(3), ang_vel(3)] = 13D
     Control: [roll, pitch, yaw, thrust] = 4D
     """
 
@@ -79,6 +83,8 @@ class LeapCMPCLayerLinearLS(nn.Module):
         gravity: Optional[float] = None,
         drone_model: str = "cf2x_L250",
         mpc_model: str = "so_rpy",
+        state_type: str = "quat",
+        integrator: str = "rk4",
         n_batch_max: int = 4096,
         num_threads: int = 8,
         velocity_max: Optional[float] = None,
@@ -101,6 +107,8 @@ class LeapCMPCLayerLinearLS(nn.Module):
             gravity: Gravitational acceleration [m/s^2]. None to load from drone_model.
             drone_model: Drone model identifier.
             mpc_model: Physics model for MPC dynamics ("so_rpy" or "so_rpy_rotor_drag").
+            state_type: MPC state type ("quat" for 13D or "euler" for 12D).
+            integrator: Integration method ("rk4" or "euler").
             n_batch_max: Maximum batch size for parallel MPC solves.
             num_threads: Number of threads for parallel MPC solves.
             velocity_max: Maximum velocity constraint [m/s]. None to disable.
@@ -113,13 +121,17 @@ class LeapCMPCLayerLinearLS(nn.Module):
         self.device = device
         self.mpc_horizon = mpc_horizon
         self.mpc_dt = mpc_dt
+        self.state_type = state_type
+        self.nx = NX_EULER if state_type == "euler" else NX
 
         # Create LEAP-C planner with stagewise parameters and LINEAR_LS cost
         planner_cfg = QuadrotorPlannerConfig(
             N_horizon=mpc_horizon,
             dt=mpc_dt,
             param_interface="stagewise",
-            cost_type="linear_ls",  # Use LINEAR_LS cost
+            cost_type="linear_ls",
+            state_type=state_type,
+            integrator=integrator,
             n_batch_max=n_batch_max,
             num_threads=num_threads,
             drone_model=drone_model,
@@ -158,14 +170,26 @@ class LeapCMPCLayerLinearLS(nn.Module):
         )
 
         # === Log scaling bounds for W (weights) ===
-        self.register_buffer(
-            'w_state_min_log',
-            torch.tensor([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.])
-        )
-        self.register_buffer(
-            'w_state_max_log',
-            torch.tensor([2., 2., 2., 1., 1., 1., 2., 2., 2., 1., 1., 1.])
-        )
+        if state_type == "euler":
+            # State: [pos(3), rpy(3), vel(3), drpy(3)] = 12D
+            self.register_buffer(
+                'w_state_min_log',
+                torch.tensor([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.])
+            )
+            self.register_buffer(
+                'w_state_max_log',
+                torch.tensor([2., 2., 2., 1., 1., 1., 2., 2., 2., 1., 1., 1.])
+            )
+        else:
+            # State: [pos(3), quat(4:xyzw), vel(3), ang_vel(3)] = 13D
+            self.register_buffer(
+                'w_state_min_log',
+                torch.tensor([-1., -1., -1., -2., -2., -2., -2., -1., -1., -1., -1., -1., -1.])
+            )
+            self.register_buffer(
+                'w_state_max_log',
+                torch.tensor([2., 2., 2., 1., 1., 1., 1., 2., 2., 2., 1., 1., 1.])
+            )
         self.register_buffer(
             'w_ctrl_min_log',
             torch.tensor([-1., -1., -1., -1.])
@@ -180,20 +204,34 @@ class LeapCMPCLayerLinearLS(nn.Module):
         # Other states use absolute bounds
         self.register_buffer(
             'pos_offset_min',
-            torch.tensor([-pos_offset_max, -pos_offset_max, -pos_offset_max])  # Relative position offset bounds [m]
+            torch.tensor([-pos_offset_max, -pos_offset_max, -pos_offset_max])
         )
         self.register_buffer(
             'pos_offset_max_buf',
-            torch.tensor([pos_offset_max, pos_offset_max, pos_offset_max])  # Relative position offset bounds [m]
+            torch.tensor([pos_offset_max, pos_offset_max, pos_offset_max])
         )
-        self.register_buffer(
-            'yref_state_min',
-            torch.tensor([0., 0., 0., -roll_pitch_max, -roll_pitch_max, -yaw_max, -5., -5., -5., -10., -10., -10.])
-        )
-        self.register_buffer(
-            'yref_state_max',
-            torch.tensor([0., 0., 0., roll_pitch_max, roll_pitch_max, yaw_max, 5., 5., 5., 10., 10., 10.])
-        )
+        if state_type == "euler":
+            # State refs: [pos(3), rpy(3), vel(3), drpy(3)] = 12D
+            # pos indices 0:3 are placeholders (replaced by relative offsets)
+            self.register_buffer(
+                'yref_state_min',
+                torch.tensor([0., 0., 0., -np.pi, -np.pi/2, -np.pi, -5., -5., -5., -10., -10., -10.])
+            )
+            self.register_buffer(
+                'yref_state_max',
+                torch.tensor([0., 0., 0., np.pi, np.pi/2, np.pi, 5., 5., 5., 10., 10., 10.])
+            )
+        else:
+            # State refs: [pos(3), quat(4:xyzw), vel(3), ang_vel(3)] = 13D
+            # pos indices 0:3 are placeholders (replaced by relative offsets)
+            self.register_buffer(
+                'yref_state_min',
+                torch.tensor([0., 0., 0., -1., -1., -1., -1., -5., -5., -5., -10., -10., -10.])
+            )
+            self.register_buffer(
+                'yref_state_max',
+                torch.tensor([0., 0., 0., 1., 1., 1., 1., 5., 5., 5., 10., 10., 10.])
+            )
         self.register_buffer(
             'yref_ctrl_min',
             torch.tensor([-roll_pitch_max, -roll_pitch_max, -yaw_max, thrust_min])
@@ -225,7 +263,7 @@ class LeapCMPCLayerLinearLS(nn.Module):
 
         Args:
             obs: Observations with shape (B, obs_dim).
-            state: MPC state with shape (B, 12) [pos, rpy, vel, drpy].
+            state: MPC state with shape (B, 13) [pos, quat(xyzw), vel, ang_vel].
 
         Returns:
             Normalized control action with shape (B, 4).
@@ -272,9 +310,10 @@ class LeapCMPCLayerLinearLS(nn.Module):
             Scaled MPC parameters [w_state, w_ctrl, yref_state, yref_ctrl].
         """
         # Split into parameter groups
-        w_state_total = NX * self.n_state_stages
+        nx = self.nx
+        w_state_total = nx * self.n_state_stages
         w_ctrl_total = NU * self.n_ctrl_stages
-        yref_state_total = NX * self.n_state_stages
+        yref_state_total = nx * self.n_state_stages
         yref_ctrl_total = NU * self.n_ctrl_stages
 
         idx = 0
@@ -287,9 +326,9 @@ class LeapCMPCLayerLinearLS(nn.Module):
         yref_ctrl_raw = net_out[:, idx:idx + yref_ctrl_total]
 
         # Reshape to per-stage
-        w_state_per_stage = w_state_raw.reshape(batch_size, self.n_state_stages, NX)
+        w_state_per_stage = w_state_raw.reshape(batch_size, self.n_state_stages, nx)
         w_ctrl_per_stage = w_ctrl_raw.reshape(batch_size, self.n_ctrl_stages, NU)
-        yref_state_per_stage = yref_state_raw.reshape(batch_size, self.n_state_stages, NX)
+        yref_state_per_stage = yref_state_raw.reshape(batch_size, self.n_state_stages, nx)
         yref_ctrl_per_stage = yref_ctrl_raw.reshape(batch_size, self.n_ctrl_stages, NU)
 
         # === Log scaling for W (weights) ===
@@ -305,7 +344,7 @@ class LeapCMPCLayerLinearLS(nn.Module):
         # pos_offset in [-pos_offset_max, +pos_offset_max] range
         pos_offset = self.pos_offset_min + yref_state_per_stage[..., :3] * (self.pos_offset_max_buf - self.pos_offset_min)
 
-        # Get current position from state: state is [pos(3), rpy(3), vel(3), drpy(3)]
+        # Get current position from state: state is [pos(3), quat(4:xyzw), vel(3), ang_vel(3)]
         current_pos = state[:, :3]  # (batch, 3)
 
         # Broadcast current position across all stages and add offset
@@ -359,6 +398,8 @@ class LeapCSharedGaussianPolicyLinearLS(GaussianMixin, Model):
         gravity: Optional[float] = None,
         drone_model: str = "cf2x_L250",
         mpc_model: str = "so_rpy",
+        state_type: str = "quat",
+        integrator: str = "rk4",
         n_batch_max: int = 4096,
         num_threads: int = 8,
         velocity_max: Optional[float] = None,
@@ -401,6 +442,8 @@ class LeapCSharedGaussianPolicyLinearLS(GaussianMixin, Model):
             gravity=gravity,
             drone_model=drone_model,
             mpc_model=mpc_model,
+            state_type=state_type,
+            integrator=integrator,
             n_batch_max=n_batch_max,
             num_threads=num_threads,
             velocity_max=velocity_max,
