@@ -22,30 +22,57 @@ classifiers = [
 ]
 
 dependencies = [
-    "numpy>=2.0.0",
-    "scipy>=1.15.0",
+    # Core environment/runtime imports from crazyflie_mape_crazyflow.envs and utils.
+    "array-api-compat>=1.10.0",
+    "crazyflow>=0.1.0b0",
+    "drone-models>=0.1.0b0",
+    "gymnasium>=1.1.0",
     "jax>=0.7.0",
-    "casadi",
+    "mujoco>=3.3.0",
+    "numpy>=2.0.0",
+    "PyYAML>=6.0.0",
+    "scipy>=1.15.0",
 ]
 
 requires-python = ">=3.11,<3.14"
 
 [project.optional-dependencies]
 learning = [
-    "gymnasium>=1.1.0",
+    # MAPPO training/evaluation policy stack.
     "torch>=2.0.0",
-    "skrl>=1.0.0",
+    "skrl>=2.0.0",
 ]
-hardware = [
+mpc = [
+    # LEAP-C/acados policy and planner stack.
+    "acados_template>=0.5.1",
+    "casadi>=3.7.0",
+    "leap-c>=2025.0.0",
     "torch>=2.0.0",
-    "skrl>=1.0.0",
-    "transforms3d>=0.4.2",
+]
+training = [
+    "crazyflie-mape-crazyflow[learning,mpc]",
+]
+eval = [
+    "crazyflie-mape-crazyflow[training]",
+    "imageio>=2.30.0",
+    "opencv-python>=4.10.0",
+    "pillow>=10.0.0",
+    "tqdm>=4.66.0",
+]
+analysis = [
+    "matplotlib>=3.8.0",
+    "pandas>=2.0.0",
+    "SciencePlots>=2.0.0",
+    "tensorboard>=2.15.0",
 ]
 gpu = ["jax[cuda12]"]
 all = [
-    "crazyflie-mape-crazyflow[learning,hardware,gpu]",
+    "crazyflie-mape-crazyflow[analysis,eval,gpu,training]",
 ]
 dev = [
+    "crazyflie-mape-crazyflow[analysis,eval,training]",
+    "drone-controllers>=0.1.0b0",
+    "packaging>=23.0",
     "pytest>=8.0.0",
     "pytest-timeout>=2.0.0",
     "ruff>=0.4.0",
