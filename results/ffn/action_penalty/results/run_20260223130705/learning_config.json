@@ -1,0 +1,53 @@
+{
+  "timesteps": 2000000,
+  "n_worlds": 128,
+  "rewards": {
+    "capture": -5.0,
+    "red_crash": 30.0,
+    "blue_crash": -5.0,
+    "boundary": -5.0,
+    "pursuer_proximity": 0.3,
+    "pursuer_proximity_decay": 2.5,
+    "angle_coef": 0.01,
+    "velocity_coef": 0.03,
+    "ground_proximity_coef": 0.0,
+    "ground_proximity_decay": 6.0,
+    "action_coef": 0.5,
+    "action_smoothness_thrust": 5.0,
+    "action_smoothness_rpy": 1.0,
+    "rr_relative_velocity_coef": 1.0
+  },
+  "hyperparameters": {
+    "rollouts": 256,
+    "learning_epochs": 4,
+    "mini_batches": 4,
+    "learning_rate": 0.0003,
+    "learning_rate_scheduler": "LinearLR",
+    "learning_rate_scheduler_kwargs": {
+      "start_factor": 1.0,
+      "end_factor": 0.0333,
+      "total_iters": 31250
+    },
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "grad_norm_clip": 0.5,
+    "entropy_loss_scale": 0.01,
+    "value_loss_scale": 1.0,
+    "ratio_clip": 0.2,
+    "value_clip": 0.2,
+    "kl_threshold": 0.0
+  },
+  "initial_log_std": [
+    -0.5,
+    -0.5,
+    -1,
+    -1.3
+  ],
+  "episode_length_s": 20.0,
+  "start_time": "2026-02-24 02:08:39",
+  "resumed_from_run": "run_20260223130705",
+  "initial_curriculum_level": 9,
+  "end_time": "2026-02-24 15:57:11",
+  "duration": "13:48:31",
+  "duration_seconds": 49711.53832
+}

@@ -21,10 +21,7 @@ venv/
 .vscode/*.db-wal
 .idea/
 
-# Training outputs and checkpoints (large files)
-results/**/run_*/
-results/**/checkpoints/
-*.pt
+# Training outputs outside curated results
 *.dat
 
 # Video recordings
@@ -65,3 +62,7 @@ Thumbs.db
 *.mcap
 rosbag2_**
 rosbag_**
+
+# Keep curated experiment results, checkpoints, plots, and run metadata trackable.
+!results/
+!results/**
